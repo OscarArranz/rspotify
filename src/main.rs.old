@@ -1,0 +1,35 @@
+mod lib;
+
+use lib::auth::{SpotifyAuth, SpotifyAuthConfig};
+
+#[tokio::main]
+async fn main() {
+    // Load environment variables from .env file
+    dotenvy::dotenv().ok();
+
+    let client_id = std::env::var("SPOTIFY_CLIENT_ID")
+        .expect("SPOTIFY_CLIENT_ID must be set in environment or .env file");
+    let redirect_uri = std::env::var("SPOTIFY_REDIRECT_URI")
+        .unwrap_or_else(|_| "http://localhost:8888/callback".to_string());
+
+    println!("Starting Spotify authentication...");
+    println!("A browser window will open for you to authorize the application.");
+
+    let config = SpotifyAuthConfig::new(client_id, redirect_uri);
+    let auth = SpotifyAuth::new(config);
+
+    match auth.authenticate().await {
+        Ok(token) => {
+            println!("\nAuthentication successful!");
+            println!("Access Token: {}", token.access_token);
+            println!("Token Type: {}", token.token_type);
+            println!("Scope: {}", token.scope);
+            println!("Expires In: {} seconds", token.expires_in);
+            println!("Refresh Token: {}", token.refresh_token);
+        }
+        Err(e) => {
+            eprintln!("Authentication failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
