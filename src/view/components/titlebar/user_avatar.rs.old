@@ -1,0 +1,207 @@
+//! User avatar button component with async profile picture loading.
+
+use gpui::{
+    App, AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    Render, SharedString, Styled, Window, div, img, px, rgb,
+};
+use rspotify::clients::OAuthClient;
+use std::sync::mpsc;
+
+use crate::hooks::use_spotify;
+
+const AVATAR_SIZE: f32 = 47.0;
+const AVATAR_BG_COLOR: u32 = 0x1f1f1f;
+const AVATAR_IMAGE_SIZE: f32 = 32.0;
+
+/// Loading state for the user avatar.
+#[derive(Clone, Debug, PartialEq)]
+enum AvatarState {
+    /// Initial state, hasn't started loading yet.
+    Idle,
+    /// Currently fetching the user profile.
+    Loading,
+    /// Successfully loaded the avatar URL.
+    Loaded(SharedString),
+    /// Failed to load or no avatar available.
+    Failed,
+}
+
+/// User avatar component that loads the profile picture asynchronously.
+pub(super) struct UserAvatarState {
+    state: AvatarState,
+}
+
+impl UserAvatarState {
+    pub fn new() -> Self {
+        Self {
+            state: AvatarState::Idle,
+        }
+    }
+
+    /// Starts fetching the user's profile picture URL.
+    fn fetch_avatar(&mut self, cx: &mut Context<Self>) {
+        // Don't re-fetch if already loading or loaded
+        if self.state != AvatarState::Idle {
+            return;
+        }
+
+        let Some(spotify) = use_spotify(cx) else {
+            println!("[UserAvatar] No spotify client available");
+            self.state = AvatarState::Failed;
+            return;
+        };
+
+        self.state = AvatarState::Loading;
+        println!("[UserAvatar] Starting to fetch avatar...");
+
+        // Use a channel to send the result from the background thread
+        let (tx, rx) = mpsc::channel::<Option<String>>();
+
+        // Spawn a background thread to run the tokio-based rspotify call
+        std::thread::spawn(move || {
+            println!("[UserAvatar] Background thread started");
+
+            // Create a tokio runtime for rspotify
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("[UserAvatar] Failed to create tokio runtime: {:?}", e);
+                    let _ = tx.send(None);
+                    return;
+                }
+            };
+
+            println!("[UserAvatar] Calling Spotify API...");
+            let result = rt.block_on(async {
+                let client = spotify.lock().await;
+                client.me().await
+            });
+
+            match result {
+                Ok(user) => {
+                    println!("[UserAvatar] Got user: {:?}", user.display_name);
+                    let avatar_url: Option<String> = user
+                        .images
+                        .and_then(|images| images.into_iter().next().map(|img| img.url));
+                    println!("[UserAvatar] Avatar URL: {:?}", avatar_url);
+                    let _ = tx.send(avatar_url);
+                }
+                Err(e) => {
+                    eprintln!("[UserAvatar] Failed to fetch user profile: {:?}", e);
+                    let _ = tx.send(None);
+                }
+            }
+            println!("[UserAvatar] Background thread done");
+        });
+
+        // Use cx.spawn similar to sign_in_button pattern
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            println!("[UserAvatar] Async task started");
+
+            // Wait for the background thread result (blocking recv)
+            let result = rx.recv();
+            println!("[UserAvatar] Received result: {:?}", result);
+
+            match result {
+                Ok(Some(url)) => {
+                    println!("[UserAvatar] Setting state to Loaded with URL: {}", url);
+                    this.update(cx, |this, inner_cx| {
+                        this.state = AvatarState::Loaded(url.into());
+                        inner_cx.notify();
+                        println!("[UserAvatar] State updated and notify() called");
+                    })
+                    .ok();
+                }
+                Ok(None) | Err(_) => {
+                    println!("[UserAvatar] Setting state to Failed");
+                    this.update(cx, |this, inner_cx| {
+                        this.state = AvatarState::Failed;
+                        inner_cx.notify();
+                        println!("[UserAvatar] State updated and notify() called");
+                    })
+                    .ok();
+                }
+            }
+
+            println!("[UserAvatar] Async task done");
+        })
+        .detach();
+    }
+}
+
+impl Render for UserAvatarState {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Start fetching if we haven't yet
+        self.fetch_avatar(cx);
+
+        let state = &self.state;
+
+        println!("[UserAvatar] render() called, state: {:?}", self.state);
+
+        match state {
+            AvatarState::Idle | AvatarState::Loading => {
+                // Show loading placeholder
+                div()
+                    .id("user-avatar")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(32.0))
+                    .rounded_full()
+                    .cursor_pointer()
+                    .bg(rgb(AVATAR_BG_COLOR))
+                    .hover(|style| style.bg(rgb(0x727272)))
+                    .child("Loading...")
+            }
+            AvatarState::Loaded(url) => {
+                println!("[UserAvatar] Rendering with URL: {}", url);
+                // Show the loaded avatar image
+                div()
+                    .id("user-avatar")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(AVATAR_SIZE))
+                    .rounded_full()
+                    .cursor_pointer()
+                    .overflow_hidden()
+                    .bg(rgb(AVATAR_BG_COLOR))
+                    .hover(|style| style.opacity(0.8))
+                    .child(img(url.clone()).size(px(AVATAR_IMAGE_SIZE)))
+            }
+            AvatarState::Failed => {
+                // Show fallback placeholder
+                div()
+                    .id("user-avatar")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(AVATAR_SIZE))
+                    .rounded_full()
+                    .cursor_pointer()
+                    .bg(rgb(AVATAR_BG_COLOR))
+                    .hover(|style| style.bg(rgb(0x727272)))
+                    .child("failed")
+            }
+        }
+    }
+}
+
+/// User avatar button - a wrapper that creates the stateful component.
+#[derive(IntoElement)]
+pub(super) struct UserAvatar {
+    state: Entity<UserAvatarState>,
+}
+
+impl UserAvatar {
+    pub(super) fn new(_window: &mut Window, cx: &mut App) -> Self {
+        let state = cx.new(|_cx| UserAvatarState::new());
+        Self { state }
+    }
+}
+
+impl gpui::RenderOnce for UserAvatar {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        self.state
+    }
+}

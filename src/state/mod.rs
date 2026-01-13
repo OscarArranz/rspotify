@@ -5,4 +5,4 @@
 
 mod app_state;
 
-pub use app_state::{AppState, AuthState};
+pub use app_state::AppState;

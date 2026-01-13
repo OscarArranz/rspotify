@@ -1,12 +1,26 @@
 [package]
-name = "rspotify-client"
+name = "rspotify_client"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [".", "reqwest_client"]
+
+[workspace.package]
+edition = "2024"
+
+[workspace.dependencies]
+gpui = { version = "*" }
+
 [dependencies]
+gpui = { workspace = true }
+
+reqwest_client = { path = "./reqwest_client" }
+
 base64 = "0.22"
 dotenvy = "0.15"
-gpui = { version = "*" }
+futures = "0.3"
+smol = "2"
 open = "5"
 rand = "0.9"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
@@ -16,3 +30,6 @@ thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 url = "2.5"
 urlencoding = "2.1"
+windows = {version = "0.62.2", features = ["Wdk_System_SystemServices", "Win32_System_SystemInformation"]}
+rspotify = "0.15.3"
+anyhow = "1.0.100"
