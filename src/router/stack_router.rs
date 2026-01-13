@@ -28,6 +28,7 @@ use gpui::{
 /// ```
 pub struct StackRouter {
     screens: Vec<AnyView>,
+    current_screen: usize,
 }
 
 impl StackRouter {
@@ -35,6 +36,7 @@ impl StackRouter {
     pub fn new() -> Self {
         Self {
             screens: Vec::new(),
+            current_screen: 0,
         }
     }
 
@@ -42,21 +44,43 @@ impl StackRouter {
     pub fn with_initial(initial: AnyView) -> Self {
         Self {
             screens: vec![initial],
+            current_screen: 0,
         }
     }
 
     /// Pushes a new screen onto the stack.
     /// Similar to React Navigation's navigation.push().
     pub fn push(&mut self, screen: AnyView, cx: &mut Context<Self>) {
+        if self.current_screen + 1 < self.screens.len() {
+            self.screens.truncate(self.current_screen + 1);
+        }
+
         self.screens.push(screen);
+
+        if self.screens.len() > 0 {
+            self.current_screen += 1;
+        }
+
         cx.notify();
     }
 
-    /// Pops the current screen from the stack.
+    /// Goes back to the previous screen in the stack.
     /// Similar to React Navigation's navigation.pop() or navigation.goBack().
-    pub fn pop(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.screens.len() > 1 {
-            self.screens.pop();
+    pub fn go_back(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.screens.len() > 1 && self.current_screen > 0 {
+            self.current_screen -= 1;
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Goes forward to the next screen in the stack.
+    /// Similar to React Navigation's navigation.pop() or navigation.goBack().
+    pub fn go_forward(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.screens.len() > 1 && self.current_screen < self.screens.len() - 1 {
+            self.current_screen += 1;
             cx.notify();
             true
         } else {
@@ -89,7 +113,12 @@ impl StackRouter {
 
     /// Returns true if we can go back (more than one screen).
     pub fn can_go_back(&self) -> bool {
-        self.screens.len() > 1
+        self.current_screen > 0
+    }
+
+    /// Returns true if we can go forward (more than one screen).
+    pub fn can_go_forward(&self) -> bool {
+        self.current_screen < self.screens.len() - 1
     }
 }
 
@@ -103,7 +132,7 @@ impl Render for StackRouter {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let current = self
             .screens
-            .last()
+            .get(self.current_screen)
             .cloned()
             .map(|v: AnyView| v.into_any_element())
             .unwrap_or_else(|| Empty.into_any_element());
@@ -145,8 +174,13 @@ impl StackRouterHandle {
     }
 
     /// Pops the current screen.
-    pub fn pop(&self, cx: &mut App) -> bool {
-        self.router.update(cx, |router, cx| router.pop(cx))
+    pub fn go_back(&self, cx: &mut App) -> bool {
+        self.router.update(cx, |router, cx| router.go_back(cx))
+    }
+
+    /// Goes forward in the navigation history.
+    pub fn go_forward(&self, cx: &mut App) -> bool {
+        self.router.update(cx, |router, cx| router.go_forward(cx))
     }
 
     /// Replaces the current screen.
@@ -171,6 +205,11 @@ impl StackRouterHandle {
     /// Returns true if navigation can go back.
     pub fn can_go_back(&self, cx: &App) -> bool {
         self.router.read(cx).can_go_back()
+    }
+
+    /// Returns true if navigation can go forward.
+    pub fn can_go_forward(&self, cx: &App) -> bool {
+        self.router.read(cx).can_go_forward()
     }
 
     /// Gets the underlying Entity for direct access.

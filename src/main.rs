@@ -4,46 +4,34 @@ mod router;
 mod state;
 mod view;
 
+use anyhow::Result;
 use gpui::{
-    App, Application, Bounds, Entity, IntoElement, ParentElement, Render, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, size,
+    App, AppContext, Application, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds,
+    WindowOptions, px, size,
 };
-
-use router::{PathRouter, PathRouterHandle, Route};
+use reqwest_client::ReqwestClient;
 use state::AppState;
-use view::main_layout::MainLayout;
-use view::screens::sign_in::SignInScreen;
+use std::sync::Arc;
+use view::root_layout::RootLayout;
 
-/// Root application component that holds the path router.
-struct RootApp {
-    router: Entity<PathRouter>,
-}
+struct Assets {}
 
-impl RootApp {
-    fn new(_window: &mut Window, cx: &mut gpui::Context<Self>) -> Self {
-        // Create the path router with routes
-        let router = cx.new(|_| {
-            PathRouter::new()
-                .route(Route::new("/sign-in", |_window, cx| {
-                    cx.new(|_| SignInScreen::new()).into()
-                }))
-                .route(Route::new("/main", |window, cx| {
-                    cx.new(|cx| MainLayout::new(window, cx)).into()
-                }))
-                .initial_path("/sign-in")
-        });
-
-        // Register path router globally so components can navigate
-        let router_handle = PathRouterHandle::new(router.clone());
-        cx.set_global(router_handle);
-
-        Self { router }
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        std::fs::read(path)
+            .map(Into::into)
+            .map_err(Into::into)
+            .map(Some)
     }
-}
 
-impl Render for RootApp {
-    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.router.clone())
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        Ok(std::fs::read_dir(path)?
+            .filter_map(|entry| {
+                Some(SharedString::from(
+                    entry.ok()?.path().to_string_lossy().into_owned(),
+                ))
+            })
+            .collect::<Vec<_>>())
     }
 }
 
@@ -51,24 +39,30 @@ fn main() {
     // Load environment variables early
     dotenvy::dotenv().ok();
 
-    Application::new().run(|cx: &mut App| {
-        // Initialize global app state (similar to React Context Provider)
-        cx.set_global(AppState::new());
+    Application::new()
+        .with_assets(Assets {})
+        .run(|cx: &mut App| {
+            // Initialize global app state (similar to React Context Provider)
+            cx.set_global(AppState::new());
 
-        let bounds = Bounds::centered(None, size(px(500.), px(600.0)), cx);
+            // Initialize HTTP client
+            let http_client = ReqwestClient::user_agent("gpui example").unwrap();
+            cx.set_http_client(Arc::new(http_client));
 
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    appears_transparent: true,
-                    title: Some("Spotify".into()),
+            let bounds = Bounds::centered(None, size(px(1400.), px(800.0)), cx);
+
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        appears_transparent: true,
+                        title: Some("Spotify".into()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| RootApp::new(window, cx)),
-        )
-        .unwrap();
-    });
+                },
+                |window, cx| cx.new(|cx| RootLayout::new(window, cx)),
+            )
+            .unwrap();
+        });
 }

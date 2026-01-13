@@ -1,11 +1,11 @@
-# Spotify Client (Rust + Iced)
+# Spotify Client (Rust + GPUI)
 
-A lightweight, high-performance Spotify client built with Rust and Iced, designed to provide the full Spotify experience with significantly lower RAM usage and better performance than the official client while mimicking its interface and features.
+A lightweight, high-performance Spotify client built with Rust and GPUI, designed to provide the full Spotify experience with significantly lower RAM usage and better performance than the official client while mimicking its interface and features.
 
 ## 🎯 Project Goals
 
 - **Performance**: Leverage Rust's efficiency for minimal resource consumption
-- **Native Feel**: Fast, responsive UI using the Iced GUI framework
+- **Native Feel**: Fast, responsive UI using the GPUI GUI framework
 - **Feature Parity**: Implement core Spotify functionality matching the official client
 - **Open Source**: Community-driven development and transparency
 
@@ -60,7 +60,7 @@ The project is structured around three main layers:
 
 ```
 src/
-├── main.rs           # Application entry point and Iced setup
+├── main.rs           # Application entry point and GPUI setup
 ├── spotify.rs        # Spotify Web API client wrapper
 ├── playback.rs       # Audio playback engine (future)
 └── ui/
@@ -72,7 +72,7 @@ src/
 
 ### Key Dependencies
 
-- **iced** - Cross-platform GUI framework
+- **gpui** - Cross-platform GUI framework
 - **rspotify** - Spotify Web API client
 - **tokio** - Async runtime
 - **librespot** (planned) - Audio playback via Spotify Connect
@@ -182,7 +182,7 @@ This project is licensed under the MIT License - see LICENSE file for details.
 
 - [librespot](https://github.com/librespot-org/librespot) - Spotify streaming library
 - [rspotify](https://github.com/ramsayleung/rspotify) - Spotify Web API wrapper
-- [Iced](https://github.com/iced-rs/iced) - GUI framework
+- [gpui](https://github.com/zed-industries/zed/tree/main/crates/gpui) - GUI framework
 - The Rust community for excellent tooling and libraries
 
 ## 📫 Contact

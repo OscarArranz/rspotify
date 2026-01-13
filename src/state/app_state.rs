@@ -4,50 +4,7 @@
 //! all components without prop drilling.
 
 use gpui::Global;
-
-use crate::lib::auth::SpotifyToken;
-
-/// Authentication state for the application.
-#[derive(Debug, Clone, Default)]
-pub struct AuthState {
-    /// The current Spotify access token.
-    pub access_token: Option<String>,
-    /// The Spotify refresh token for obtaining new access tokens.
-    pub refresh_token: Option<String>,
-    /// Token type (usually "Bearer").
-    pub token_type: Option<String>,
-    /// Granted OAuth scopes.
-    pub scope: Option<String>,
-    /// Token expiration time in seconds.
-    pub expires_in: Option<u64>,
-}
-
-impl AuthState {
-    /// Returns true if the user is authenticated.
-    pub fn is_authenticated(&self) -> bool {
-        self.access_token.is_some()
-    }
-
-    /// Creates an AuthState from a SpotifyToken.
-    pub fn from_token(token: &SpotifyToken) -> Self {
-        Self {
-            access_token: Some(token.access_token.clone()),
-            refresh_token: Some(token.refresh_token.clone()),
-            token_type: Some(token.token_type.clone()),
-            scope: Some(token.scope.clone()),
-            expires_in: Some(token.expires_in),
-        }
-    }
-
-    /// Clears the authentication state (logout).
-    pub fn clear(&mut self) {
-        self.access_token = None;
-        self.refresh_token = None;
-        self.token_type = None;
-        self.scope = None;
-        self.expires_in = None;
-    }
-}
+use rspotify::AuthCodePkceSpotify;
 
 /// Global application state accessible from any component.
 ///
@@ -55,19 +12,20 @@ impl AuthState {
 /// ```ignore
 /// // Read state
 /// let app_state = cx.global::<AppState>();
-/// if app_state.auth.is_authenticated() {
+/// if app_state.is_authenticated() {
 ///     // user is logged in
 /// }
 ///
 /// // Update state
 /// cx.update_global::<AppState, _>(|state, _cx| {
-///     state.auth = AuthState::from_token(&token);
+///     state.set_spotify_client(client);
 /// });
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct AppState {
-    /// Authentication state (tokens, user info).
-    pub auth: AuthState,
+    /// The authenticated Spotify client.
+    /// Wrapped in Arc<Mutex> for thread-safe access and async operations.
+    spotify: Option<AuthCodePkceSpotify>,
 }
 
 impl Global for AppState {}
@@ -78,13 +36,24 @@ impl AppState {
         Self::default()
     }
 
-    /// Sets the authentication state from a Spotify token.
-    pub fn set_auth(&mut self, token: &SpotifyToken) {
-        self.auth = AuthState::from_token(token);
+    /// Returns true if the user is authenticated.
+    pub fn is_authenticated(&self) -> bool {
+        self.spotify.is_some()
+    }
+
+    /// Sets the authenticated Spotify client.
+    pub fn set_spotify_client(&mut self, client: AuthCodePkceSpotify) {
+        self.spotify = Some(client);
+    }
+
+    /// Gets a clone of the Spotify client handle.
+    /// Returns None if not authenticated.
+    pub fn spotify_client(&self) -> Option<AuthCodePkceSpotify> {
+        self.spotify.clone()
     }
 
     /// Clears authentication (logout).
     pub fn logout(&mut self) {
-        self.auth.clear();
+        self.spotify = None;
     }
 }

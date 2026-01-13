@@ -1,4 +1,4 @@
-use crate::lib::auth::{SpotifyAuth, SpotifyAuthConfig, SpotifyToken};
+use crate::lib::auth::{SpotifyAuthConfig, authenticate};
 use crate::router::PathRouterHandle;
 use crate::state::AppState;
 
@@ -6,6 +6,7 @@ use gpui::{
     AnyElement, App, AsyncApp, InteractiveElement, IntoElement, MouseButton, ParentElement,
     RenderOnce, StatefulInteractiveElement, Styled, Window, div, prelude::*, px, rgb,
 };
+use rspotify::AuthCodePkceSpotify;
 use std::sync::mpsc;
 
 #[derive(IntoElement)]
@@ -16,9 +17,9 @@ impl SignInButton {
         SignInButton {}
     }
 
-    /// Performs Spotify authentication and returns the token.
+    /// Performs Spotify authentication and returns the authenticated client.
     /// This is a blocking call that should be run in a background thread.
-    pub fn authenticate() -> Result<SpotifyToken, String> {
+    pub fn do_authenticate() -> Result<AuthCodePkceSpotify, String> {
         // Load environment variables from .env file
         dotenvy::dotenv().ok();
 
@@ -31,9 +32,7 @@ impl SignInButton {
         println!("A browser window will open for you to authorize the application.");
 
         let config = SpotifyAuthConfig::new(client_id, redirect_uri);
-        let auth = SpotifyAuth::new(config);
-
-        auth.authenticate().map_err(|e| e.to_string())
+        authenticate(&config).map_err(|e| e.to_string())
     }
 }
 
@@ -59,11 +58,11 @@ impl RenderOnce for SignInButton {
                 let window_handle = window_handle.clone();
 
                 // Use a channel to send the result from the background thread
-                let (tx, rx) = mpsc::channel::<Result<SpotifyToken, String>>();
+                let (tx, rx) = mpsc::channel::<Result<AuthCodePkceSpotify, String>>();
 
                 // Run authentication in a background thread (blocking I/O)
                 std::thread::spawn(move || {
-                    let result = SignInButton::authenticate();
+                    let result = SignInButton::do_authenticate();
                     let _ = tx.send(result);
                 });
 
@@ -73,14 +72,12 @@ impl RenderOnce for SignInButton {
                     let result = rx.recv();
 
                     match result {
-                        Ok(Ok(token)) => {
-                            // Store the token in global app state
+                        Ok(Ok(spotify_client)) => {
+                            // Store the authenticated client in global app state
                             cx.update(|cx| {
                                 cx.update_global::<AppState, _>(|state, _cx| {
-                                    state.set_auth(&token);
+                                    state.set_spotify_client(spotify_client);
                                     println!("\nAuthentication successful!");
-                                    println!("Access Token: {}", token.access_token);
-                                    println!("Refresh Token: {}", token.refresh_token);
                                 });
                             })
                             .ok();

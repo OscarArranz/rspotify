@@ -1,25 +1,14 @@
 use gpui::{
-    AsyncApp, Context, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
-    Styled, Window, div, prelude::*, px, rgb,
+    AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, rgb,
 };
 
-use crate::hooks::use_app_state;
-use crate::router::{PathRouterHandle, StackRouter, StackRouterHandle};
-use crate::state::AppState;
+use crate::router::{StackRouter, StackRouterHandle};
 
 /// A simple home screen to show inside the stack router.
 pub struct HomeScreen;
 
 impl Render for HomeScreen {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let scopes = use_app_state(cx, |state, _| {
-            state
-                .auth
-                .scope
-                .clone()
-                .unwrap_or_else(|| "User".to_string())
-        });
-
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -32,11 +21,6 @@ impl Render for HomeScreen {
                     .text_2xl()
                     .font_weight(gpui::FontWeight::BOLD)
                     .child("Welcome to Spotify!"),
-            )
-            .child(
-                div()
-                    .text_color(rgb(0xb3b3b3))
-                    .child(format!("Scopes: {}", scopes)),
             )
             .child(
                 div()
@@ -76,66 +60,15 @@ impl MainLayout {
 }
 
 impl Render for MainLayout {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let router_handle = cx.global::<PathRouterHandle>().clone();
-        let window_handle = window.window_handle();
-
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // Main content area with stack router
+        // Note: Header/titlebar is now handled by RootLayout
         div()
             .flex()
             .flex_col()
             .size_full()
             .bg(rgb(0x121212)) // Spotify dark background
             .text_color(rgb(0xffffff))
-            // Header with logout button
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .w_full()
-                    .px(px(16.0))
-                    .py(px(12.0))
-                    .bg(rgb(0x000000))
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(0x1DB954))
-                            .child("Spotify"),
-                    )
-                    .child(
-                        div()
-                            .id("logout-button")
-                            .px(px(16.0))
-                            .py(px(8.0))
-                            .bg(rgb(0x282828))
-                            .hover(|style| style.bg(rgb(0x3e3e3e)))
-                            .rounded(px(4.0))
-                            .cursor_pointer()
-                            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                                let router = router_handle.clone();
-                                let window_handle = window_handle.clone();
-
-                                // Clear auth state
-                                cx.update_global::<AppState, _>(|state, _cx| {
-                                    state.logout();
-                                    println!("Logged out");
-                                });
-
-                                // Navigate back to sign-in
-                                cx.spawn(async move |cx: &mut AsyncApp| {
-                                    window_handle
-                                        .update(cx, |_, window, cx| {
-                                            router.navigate("/sign-in", window, cx);
-                                        })
-                                        .ok();
-                                })
-                                .detach();
-                            })
-                            .child("Logout"),
-                    ),
-            )
-            // Main content area with stack router
-            .child(div().flex_1().child(self.stack_router.clone()))
+            .child(self.stack_router.clone())
     }
 }

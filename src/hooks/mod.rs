@@ -4,11 +4,15 @@
 //! - use_app_state: Similar to useContext for global app state
 //! - use_navigate: Similar to React Router's useNavigate
 //! - use_stack_nav: Similar to React Navigation's useNavigation
+//! - use_spotify: Get the authenticated Spotify client for API calls
 //!
 //! Note: In GPUI, "hooks" are just helper functions that access context.
 //! Unlike React hooks, they don't have the same rules about ordering.
 
 use gpui::{App, AppContext, Window};
+use rspotify::AuthCodePkceSpotify;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::router::{PathRouterHandle, StackRouterHandle};
 use crate::state::AppState;
@@ -18,7 +22,7 @@ use crate::state::AppState;
 /// Usage:
 /// ```ignore
 /// use_app_state(cx, |state, _app| {
-///     if state.auth.is_authenticated() {
+///     if state.is_authenticated() {
 ///         // user is logged in
 ///     }
 /// });
@@ -35,7 +39,7 @@ pub fn use_app_state<C: AppContext<Result<R> = R>, R>(
 /// Usage:
 /// ```ignore
 /// use_set_app_state(cx, |state| {
-///     state.set_auth(&token);
+///     state.set_spotify_client(client);
 /// });
 /// ```
 pub fn use_set_app_state<F, R>(cx: &mut App, f: F) -> R
@@ -89,6 +93,24 @@ pub fn navigate_to(path: impl Into<String>, window: &mut Window, cx: &mut App) {
 /// ```
 pub fn is_authenticated(cx: &App) -> bool {
     cx.try_global::<AppState>()
-        .map(|s| s.auth.is_authenticated())
+        .map(|s| s.is_authenticated())
         .unwrap_or(false)
+}
+
+/// Gets the authenticated Spotify client for making API calls.
+///
+/// Returns None if the user is not authenticated.
+///
+/// Usage:
+/// ```ignore
+/// if let Some(spotify) = use_spotify(cx) {
+///     // Use spotify client for API calls
+///     cx.spawn(async move |_| {
+///         let client = spotify.lock().await;
+///         let user = client.current_user().await;
+///     }).detach();
+/// }
+/// ```
+pub fn use_spotify(cx: &App) -> Option<AuthCodePkceSpotify> {
+    cx.try_global::<AppState>().and_then(|s| s.spotify_client())
 }
