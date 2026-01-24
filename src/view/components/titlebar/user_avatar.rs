@@ -48,15 +48,12 @@ impl UserAvatar {
                 let rt = Runtime::new().unwrap();
 
                 let user_data = rt.block_on(async { spotify.me().await }).unwrap();
-                println!("User data: {:?}", user_data);
                 let avatar_url = user_data.images.unwrap().first().unwrap().url.clone();
 
                 this.update(cx, |this, cx| {
                     this.avatar = UserAvatarState::Loaded(avatar_url.into());
                     cx.notify();
                 })
-                .inspect(|_| println!("Avatar loaded"))
-                .inspect_err(|e| println!("Error loading avatar: {}", e))
                 .ok();
             })
             .detach()

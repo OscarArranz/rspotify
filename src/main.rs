@@ -9,6 +9,7 @@ use gpui::{
     App, AppContext, Application, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions, px, size,
 };
+use gpui_component::Root;
 use reqwest_client::ReqwestClient;
 use state::AppState;
 use std::sync::Arc;
@@ -49,6 +50,9 @@ fn main() {
             let http_client = ReqwestClient::user_agent("gpui example").unwrap();
             cx.set_http_client(Arc::new(http_client));
 
+            // Initialize GPUI component
+            gpui_component::init(cx);
+
             let bounds = Bounds::centered(None, size(px(1400.), px(800.0)), cx);
 
             cx.open_window(
@@ -61,7 +65,10 @@ fn main() {
                     }),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| RootLayout::new(window, cx)),
+                |window, cx| {
+                    let root_layout = cx.new(|cx| RootLayout::new(window, cx));
+                    cx.new(|cx| Root::new(root_layout, window, cx))
+                },
             )
             .unwrap();
         });
