@@ -18,11 +18,11 @@ mod search_bar;
 mod user_avatar;
 mod window_controls;
 
-use gpui::{
-    App, Div, InteractiveElement, IntoElement, MouseButton, ParentElement, RenderOnce, Stateful,
-    Styled, Window, div, prelude::FluentBuilder, px, rgb,
-};
 use gpui::{AppContext, Context, Entity, Render, WindowControlArea};
+use gpui::{
+    Div, InteractiveElement, IntoElement, MouseButton, ParentElement, Stateful, Styled, Window,
+    div, prelude::FluentBuilder, px, rgb,
+};
 
 use crate::hooks::is_authenticated;
 use crate::view::components::titlebar::friends_button::friends_button;
@@ -89,7 +89,6 @@ impl Render for Titlebar {
             .w_full()
             .h(px(TITLEBAR_HEIGHT))
             .bg(rgb(TITLEBAR_BG))
-            // .px(px(8.0))
             // Make the titlebar draggable for window movement
             .map(|this| {
                 this.on_mouse_down_out(window.listener_for(&state, |state, _, _window, _| {

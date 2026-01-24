@@ -27,11 +27,8 @@ impl SignInButton {
             .map_err(|_| "SPOTIFY_CLIENT_ID must be set in environment or .env file")?;
         let redirect_uri = std::env::var("SPOTIFY_REDIRECT_URI")
             .unwrap_or_else(|_| "http://localhost:8888/callback".to_string());
-
-        println!("Starting Spotify authentication...");
-        println!("A browser window will open for you to authorize the application.");
-
         let config = SpotifyAuthConfig::new(client_id, redirect_uri);
+
         authenticate(&config).map_err(|e| e.to_string())
     }
 }
@@ -77,7 +74,6 @@ impl RenderOnce for SignInButton {
                             cx.update(|cx| {
                                 cx.update_global::<AppState, _>(|state, _cx| {
                                     state.set_spotify_client(spotify_client);
-                                    println!("\nAuthentication successful!");
                                 });
                             })
                             .ok();

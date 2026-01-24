@@ -17,6 +17,7 @@ gpui = { workspace = true }
 
 reqwest_client = { path = "./reqwest_client" }
 
+gpui-component = "0.5.0"
 base64 = "0.22"
 dotenvy = "0.15"
 futures = "0.3"
