@@ -34,3 +34,4 @@ urlencoding = "2.1"
 windows = {version = "0.62.2", features = ["Wdk_System_SystemServices", "Win32_System_SystemInformation"]}
 rspotify = "0.15.3"
 anyhow = "1.0.100"
+rust-embed = { version = "8.11.0", features = ["debug-embed"] }

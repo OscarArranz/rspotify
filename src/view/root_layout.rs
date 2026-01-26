@@ -9,7 +9,7 @@ use gpui::{
 };
 
 use crate::router::{PathRouter, PathRouterHandle, Route};
-use crate::view::components::titlebar::{TITLEBAR_HEIGHT, Titlebar};
+use crate::view::components::titlebar::Titlebar;
 use crate::view::main_layout::MainLayout;
 use crate::view::screens::sign_in::SignInScreen;
 
@@ -45,11 +45,12 @@ impl RootLayout {
 }
 
 impl Render for RootLayout {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .size_full()
+            .font_family("Spotify Mix UI Title Var Wide")
             .bg(rgb(0x121212))
             // Titlebar at the top
             .child(self.titlebar.clone())
