@@ -6,16 +6,12 @@ use gpui::{
     App, Hsla, IntoElement, Length, ParentElement, RenderOnce, Styled, Window, div, px, rgb, svg,
 };
 
-const FRIENDS_OUTLINED_SVG: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/friends-outlined.svg");
-const NOTIFICATION_BELL_SVG: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/notification-bell-outlined.svg"
-);
-const BACK_SVG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/back.svg");
-const FORWARD_SVG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/forward.svg");
-const HOME_SVG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/home-outlined.svg");
-const HOME_ACTIVE_SVG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/home-full.svg");
+const FRIENDS_OUTLINED_SVG: &str = "icons/friends-outlined.svg";
+const NOTIFICATION_BELL_SVG: &str = "icons/notification-bell-outlined.svg";
+const BACK_SVG: &str = "icons/back.svg";
+const FORWARD_SVG: &str = "icons/forward.svg";
+const HOME_SVG: &str = "icons/home-outlined.svg";
+const HOME_ACTIVE_SVG: &str = "icons/home-full.svg";
 
 /// A placeholder icon (+ shape) used as a stand-in for all icons.
 /// Replace with actual SVG icons as needed.
