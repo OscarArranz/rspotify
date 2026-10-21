@@ -5,6 +5,8 @@
 //! context-resolve endpoint (`SpClient::get_context` / `get_next_page`).
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use librespot::core::{Session, SpotifyUri};
@@ -17,6 +19,7 @@ use librespot::protocol::{
     metadata::{Episode as EpisodeMessage, Track as TrackMessage},
 };
 use protobuf::{EnumOrUnknown, Message};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::error::SpotifyError;
@@ -62,7 +65,7 @@ impl PlaylistSource {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PlaylistDetail {
     pub context_uri: String,
     pub name: String,
@@ -79,7 +82,7 @@ pub struct PlaylistDetail {
     pub(crate) added_at: HashMap<String, i64>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PlaylistTrack {
     pub uri: String,
     pub title: String,
@@ -96,6 +99,84 @@ pub struct PlaylistTrack {
 pub struct PlaylistPage {
     pub tracks: Vec<PlaylistTrack>,
     pub next_page_url: Option<String>,
+}
+
+fn detail_cache_path(account: &str, source: &PlaylistSource) -> PathBuf {
+    let identity = match source {
+        PlaylistSource::Playlist { uri, .. } => uri.as_str(),
+        // Use the same collection URI used by the native context request. Keep the
+        // account in the key as an extra guard against sharing private library data.
+        PlaylistSource::LikedSongs => {
+            return detail_cache_path_for_identity(
+                account,
+                &format!("spotify:user:{account}:collection"),
+            );
+        }
+    };
+    detail_cache_path_for_identity(account, identity)
+}
+
+fn detail_cache_path_for_identity(account: &str, identity: &str) -> PathBuf {
+    let key = format!("{account}\0{identity}");
+    let filename = key
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let root = std::env::var_os("RSPOTIFY_STATE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .map(|p| p.join("rspotify"))
+        })
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|p| p.join(".cache/rspotify"))
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("rspotify"));
+    root.join("playlists").join(format!("{filename}.json"))
+}
+
+pub fn read_cached_detail(account: &str, source: &PlaylistSource) -> Option<PlaylistDetail> {
+    fs::read(detail_cache_path(account, source))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .or_else(|| {
+            // Migrate caches created by the initial optimistic-loading implementation.
+            let PlaylistSource::LikedSongs = source else {
+                return None;
+            };
+            fs::read(detail_cache_path_for_identity(account, "liked-songs"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        })
+}
+
+pub fn write_cached_detail(account: &str, source: &PlaylistSource, detail: &PlaylistDetail) {
+    let path = detail_cache_path(account, source);
+    let Some(parent) = path.parent() else { return };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+    }
+    let Ok(bytes) = serde_json::to_vec(detail) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if fs::write(&tmp, bytes).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        }
+        let _ = fs::rename(tmp, path);
+    }
 }
 
 /// Loads a playlist header plus the first context page.
@@ -818,6 +899,90 @@ fn html_to_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_detail_round_trips_and_corrupt_data_is_ignored() {
+        let source = PlaylistSource::Playlist {
+            uri: "spotify:playlist:cache-test".into(),
+            name: "Preview".into(),
+            owner: "owner".into(),
+            image_url: None,
+        };
+        let detail = PlaylistDetail {
+            context_uri: "spotify:playlist:cache-test".into(),
+            name: "Cached playlist".into(),
+            tracks: vec![PlaylistTrack {
+                title: "Cached track".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let path = detail_cache_path("cache-test-account", &source);
+        write_cached_detail("cache-test-account", &source, &detail);
+        let loaded = read_cached_detail("cache-test-account", &source).unwrap();
+        assert_eq!(loaded.name, detail.name);
+        assert_eq!(loaded.tracks[0].title, "Cached track");
+        fs::write(&path, b"not json").unwrap();
+        assert!(read_cached_detail("cache-test-account", &source).is_none());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn liked_songs_cache_is_scoped_to_the_account_collection() {
+        let detail = PlaylistDetail {
+            context_uri: "spotify:user:cache-test-account:collection".into(),
+            name: "Liked Songs".into(),
+            tracks: vec![
+                PlaylistTrack {
+                    title: "Saved track".into(),
+                    ..Default::default()
+                };
+                5855
+            ],
+            ..Default::default()
+        };
+        let source = PlaylistSource::LikedSongs;
+        write_cached_detail("cache-test-account", &source, &detail);
+        assert_eq!(
+            read_cached_detail("cache-test-account", &source)
+                .unwrap()
+                .tracks
+                .len(),
+            5855
+        );
+        assert_eq!(
+            read_cached_detail("cache-test-account", &source)
+                .unwrap()
+                .tracks[0]
+                .title,
+            "Saved track"
+        );
+        assert!(read_cached_detail("another-account", &source).is_none());
+        let _ = fs::remove_file(detail_cache_path("cache-test-account", &source));
+    }
+
+    #[test]
+    fn reads_legacy_liked_songs_cache_key() {
+        let source = PlaylistSource::LikedSongs;
+        let legacy_path = detail_cache_path_for_identity("legacy-cache-account", "liked-songs");
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy_path,
+            serde_json::to_vec(&PlaylistDetail {
+                name: "Legacy Liked Songs".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_cached_detail("legacy-cache-account", &source)
+                .unwrap()
+                .name,
+            "Legacy Liked Songs"
+        );
+        let _ = fs::remove_file(legacy_path);
+    }
 
     #[test]
     fn maps_context_track_metadata() {

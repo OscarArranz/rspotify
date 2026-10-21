@@ -41,6 +41,14 @@ gradient fading into `#121212` from roughly `14% 12%`.
      `spotify:user:<username>:collection` is the context URI.
    - The cover image is fetched and sampled on the worker to produce a header accent colour.
 3. Results return through a `oneshot` channel and are applied in `cx.spawn`.
+   Before the network request, the worker reads the last cached detail for this account/source and
+   sends it to the screen. The cache is stored separately from session credentials under the app
+   cache directory; only successfully fetched details are written. A refresh failure leaves cached
+   content visible and reports the error without replacing the page with a blocking error screen.
+   Liked Songs is decoded during background authentication and retained in the authenticated
+   client as an account-scoped snapshot. Its screen is initialized from this snapshot before its
+   first render, rather than first rendering a placeholder and waiting for an asynchronous read.
+   Refresh and pagination update the retained snapshot; disk I/O stays on workers.
 4. Context-page tracks are hydrated through the same batched native metadata path. When the list
    scrolls near the end, `PlaylistScreen` fetches `next_page_url` on another worker and appends
    parsed tracks through `ListState::splice`.
@@ -69,7 +77,8 @@ gradient fading into `#121212` from roughly `14% 12%`.
 `PlaylistScreen` owns:
 
 - immutable `PlaylistSource` preview data and a cloned `NativeSpotify` handle;
-- load status (`Loading`, `Loaded`, `Error`) and `PlaylistDetail`;
+- load status (`Loading`, `Loaded`, `Error`) and optional `PlaylistDetail` (including stale cached
+  detail while refreshing);
 - the current search string, sort mode, and visible track indices;
 - `ListState` for the whole page;
 - pagination flags and the playback snapshot.
@@ -116,7 +125,8 @@ return a playlist cover for the collection URI.
 
 ## Failure modes
 
-- Session/context/playlist failures show an error state with the source preview and a Retry button.
+- Session/context/playlist failures show an error state with the source preview and a Retry button
+  when no cached detail exists; with cached detail, keep it visible and surface a refresh error.
 - A failed next-page request leaves the loaded tracks intact, shows the error in the action bar, and
   is retried the next time the user scrolls near the end.
 - Missing artwork, owner name, description, duration, or added-at timestamp degrades gracefully.
