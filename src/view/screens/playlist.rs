@@ -6,7 +6,8 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures::channel::oneshot;
+use futures::StreamExt;
+use futures::channel::{mpsc, oneshot};
 use gpui::{
     AnyElement, AppContext, Context, Entity, InteractiveElement, IntoElement, ListAlignment,
     ListScrollEvent, ListState, ParentElement, Render, StatefulInteractiveElement, Styled,
@@ -108,6 +109,11 @@ impl PlaylistScreen {
             next_page_error: None,
             action_error: None,
         };
+        if matches!(this.source, PlaylistSource::LikedSongs) {
+            if let Some(detail) = this.client.loaded_liked_songs_detail() {
+                this.apply_detail(detail, cx);
+            }
+        }
         this.start_load(cx);
         this.start_playback_poll(cx);
         this
@@ -115,31 +121,46 @@ impl PlaylistScreen {
 
     fn start_load(&mut self, cx: &mut Context<Self>) {
         self.state = LoadState::Loading;
-        self.detail = None;
-        self.visible_indices.clear();
+        if self.detail.is_none() {
+            self.visible_indices.clear();
+        }
         self.next_page_loading = false;
         self.next_page_error = None;
         self.action_error = None;
-        self.list_state.reset(1);
+        self.list_state.reset(self.item_count().max(1));
 
         let client = self.client.clone();
         let source = self.source.clone();
-        let (tx, rx) = oneshot::channel();
+        let has_detail = self.detail.is_some();
+        let (tx, mut rx) = mpsc::unbounded();
         std::thread::spawn(move || {
-            let _ = tx.send(client.playlist_detail(source));
+            if !has_detail {
+                if let Some(detail) = client.cached_playlist_detail(&source) {
+                    let _ = tx.unbounded_send(Ok(detail));
+                }
+            }
+            let result = client.playlist_detail(source.clone());
+            if let Ok(detail) = &result {
+                client.cache_playlist_detail(&source, detail);
+            }
+            let _ = tx.unbounded_send(result);
         });
 
         cx.spawn(async move |this, cx| {
-            let Ok(result) = rx.await else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(detail) => this.apply_detail(detail, cx),
-                Err(error) => {
-                    this.state = LoadState::Error(error.to_string());
-                    cx.notify();
-                }
-            });
+            while let Some(result) = rx.next().await {
+                let _ = this.update(cx, |this, cx| match result {
+                    Ok(detail) => this.apply_detail(detail, cx),
+                    Err(error) => {
+                        if this.detail.is_some() {
+                            this.action_error = Some(format!("Refresh failed: {error}"));
+                            this.state = LoadState::Loaded;
+                        } else {
+                            this.state = LoadState::Error(error.to_string());
+                        }
+                        cx.notify();
+                    }
+                });
+            }
         })
         .detach();
         cx.notify();
@@ -147,6 +168,7 @@ impl PlaylistScreen {
 
     fn apply_detail(&mut self, detail: PlaylistDetail, cx: &mut Context<Self>) {
         self.detail = Some(detail);
+        self.action_error = None;
         self.rebuild_visible();
         self.state = LoadState::Loaded;
         self.list_state.reset(self.item_count());
@@ -278,6 +300,12 @@ impl PlaylistScreen {
                 self.list_state
                     .splice(old_item_count..old_item_count, added);
             }
+        }
+        if let Some(detail) = self.detail.as_ref() {
+            let client = self.client.clone();
+            let source = self.source.clone();
+            let detail = detail.clone();
+            std::thread::spawn(move || client.cache_playlist_detail(&source, &detail));
         }
         cx.notify();
     }
@@ -1168,7 +1196,7 @@ impl Render for PlaylistScreen {
             .rounded_lg()
             .overflow_hidden();
 
-        let content = if matches!(&self.state, LoadState::Loading) {
+        let content = if matches!(&self.state, LoadState::Loading) && self.detail.is_none() {
             self.render_placeholder(header_height, cover_size, "Loading playlist…", false, cx)
         } else if let LoadState::Error(error) = &self.state {
             self.render_placeholder(header_height, cover_size, error, true, cx)

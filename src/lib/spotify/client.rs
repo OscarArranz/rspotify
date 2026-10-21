@@ -133,6 +133,7 @@ struct NativeInner {
     playback: Arc<Mutex<PlaybackInner>>,
     runtime: Arc<tokio::runtime::Runtime>,
     username: String,
+    liked_songs_detail: Mutex<Option<PlaylistDetail>>,
 }
 
 /// Cloneable handle to an authenticated native Spotify session.
@@ -262,6 +263,10 @@ impl NativeSpotify {
         spawn_player_event_loop(&runtime, &player, playback.clone());
 
         let username = session.username();
+        // Authentication already runs on a worker. Decode the collection here so opening
+        // Liked Songs never needs to render a placeholder while waiting on disk I/O.
+        let liked_songs_detail =
+            playlist::read_cached_detail(&username, &PlaylistSource::LikedSongs);
 
         Ok(Self {
             inner: Arc::new(NativeInner {
@@ -270,6 +275,7 @@ impl NativeSpotify {
                 playback,
                 runtime,
                 username,
+                liked_songs_detail: Mutex::new(liked_songs_detail),
             }),
         })
     }
@@ -398,6 +404,22 @@ impl NativeSpotify {
         self.inner
             .runtime
             .block_on(playlist::fetch_playlist_detail(&self.inner.session, source))
+    }
+
+    pub fn cached_playlist_detail(&self, source: &PlaylistSource) -> Option<PlaylistDetail> {
+        playlist::read_cached_detail(&self.inner.username, source)
+    }
+
+    pub fn cache_playlist_detail(&self, source: &PlaylistSource, detail: &PlaylistDetail) {
+        if matches!(source, PlaylistSource::LikedSongs) {
+            *self.inner.liked_songs_detail.lock().unwrap() = Some(detail.clone());
+        }
+        playlist::write_cached_detail(&self.inner.username, source, detail);
+    }
+
+    /// In-memory only: safe to use when constructing the screen on the UI thread.
+    pub fn loaded_liked_songs_detail(&self) -> Option<PlaylistDetail> {
+        self.inner.liked_songs_detail.lock().unwrap().clone()
     }
 
     /// Fetches one additional context page for an already-loaded playlist.

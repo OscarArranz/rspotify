@@ -2,6 +2,9 @@
 
 ## Implementation
 
+- [x] Persist opened playlist details separately from credentials; display cached data immediately
+  while refreshing and retain it if refresh fails.
+
 - [x] Add the playlist detail feature specification and design.
 - [x] Add `src/lib/spotify/playlist.rs` with playlist/context types and native fetches.
 - [x] Add cover-colour sampling and the direct `image` dependency.
@@ -24,9 +27,19 @@
 
 ## Validation
 
+- [x] Investigate Liked Songs optimistic loading: local cache data decoded correctly and reached the
+  screen after render, identifying an initial-frame placeholder. Preload its cache during
+  background authentication and initialize the screen from the in-memory snapshot.
+- [x] Initialize Liked Songs from a snapshot preloaded during background authentication so its
+  first render already contains cached rows; update the snapshot on refresh and pagination.
+
+- [x] Test playlist and account-scoped Liked Songs cache round-trips, plus corrupt-cache fallback;
+  Liked Songs regression uses 5,855 rows. Refresh replacement and stale-data retention still need
+  visual verification (not asserted by these cache tests).
+
 - [x] `cargo fmt --check`
 - [x] `cargo check`
-- [x] `cargo test` (4 passed, 2 ignored)
+- [x] `cargo test` (10 passed, 3 ignored)
 - [ ] Visual check against the installed Flatpak client at the default and wide window sizes.
 - [x] Read-only real-account check (explicitly approved): inspect context/rootlist structure and
   verify Liked Songs metadata hydration. No playback was started.

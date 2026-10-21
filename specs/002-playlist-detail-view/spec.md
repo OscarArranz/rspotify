@@ -28,6 +28,8 @@ playback through the existing local Spotify Connect device.
 - Search input text is explicitly white for legibility on the dark Spotify-style surfaces.
 - Large playlists load additional pages as the user scrolls near the end.
 - Loading, empty, and error states are visible, with retry for a failed initial load.
+- Previously opened playlist details are persisted locally and shown immediately on later opens;
+  fresh native data replaces the cached view after background refresh.
 - Playback requires Spotify Premium. Any playback-related user-facing copy keeps that statement.
 
 ## Out of scope
