@@ -130,6 +130,7 @@ struct PlaybackInner {
 struct NativeInner {
     session: Session,
     spirc: Spirc,
+    mixer: Arc<SoftMixer>,
     playback: Arc<Mutex<PlaybackInner>>,
     runtime: Arc<tokio::runtime::Runtime>,
     username: String,
@@ -243,7 +244,7 @@ impl NativeSpotify {
             ..Default::default()
         };
 
-        let mixin: Arc<dyn Mixer> = mixer;
+        let mixin: Arc<dyn Mixer> = mixer.clone();
         let (spirc, spirc_task) = runtime
             .block_on(Spirc::new(
                 connect_config,
@@ -267,6 +268,7 @@ impl NativeSpotify {
             inner: Arc::new(NativeInner {
                 session,
                 spirc,
+                mixer,
                 playback,
                 runtime,
                 username,
@@ -545,6 +547,13 @@ impl NativeSpotify {
         let mut playback = self.inner.playback.lock().unwrap();
         playback.snapshot.volume_percent = percent.min(100);
         Ok(())
+    }
+
+    /// Applies volume directly to the local soft mixer without sending a Connect command.
+    /// Use this for responsive drag previews, then call `set_volume_percent` on release.
+    pub fn set_local_volume_percent(&self, percent: u8) {
+        let value = (percent.min(100) as u32 * u16::MAX as u32 / 100) as u16;
+        self.inner.mixer.set_volume(value);
     }
 
     pub fn set_shuffle(&self, shuffle: bool) -> Result<(), SpotifyError> {

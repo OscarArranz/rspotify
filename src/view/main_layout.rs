@@ -1,9 +1,10 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::channel::oneshot;
 use gpui::{
-    AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, img, px, relative, rgb, svg,
+    AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
+    StatefulInteractiveElement, Styled, Window, canvas, div, img, px, relative, rgb, svg,
 };
 
 use crate::lib::spotify::{LibraryPlaylist, NativeSpotify, PlaybackSnapshot, PlaylistSource};
@@ -311,6 +312,48 @@ impl Render for LibrarySidebar {
 struct PlayerBar {
     client: NativeSpotify,
     playback: PlaybackSnapshot,
+    seek_slider: Slider,
+    volume_slider: Slider,
+    dragging: Option<SliderDrag>,
+    optimistic_seek: Option<OptimisticSeek>,
+    optimistic_volume: Option<OptimisticVolume>,
+}
+
+struct OptimisticSeek {
+    target_ms: u64,
+    started_at: Instant,
+    track_uri: String,
+}
+
+struct OptimisticVolume {
+    target_percent: u8,
+    started_at: Instant,
+}
+
+#[derive(Default)]
+struct Slider {
+    bounds: Option<Bounds<Pixels>>,
+    hover: Option<f32>,
+}
+
+impl Slider {
+    fn fraction_at(&self, x: Pixels) -> Option<f32> {
+        self.bounds.map(|bounds| slider_fraction(bounds, x))
+    }
+
+    fn contains(&self, point: &gpui::Point<Pixels>) -> bool {
+        self.bounds.is_some_and(|bounds| bounds.contains(point))
+    }
+
+    fn update_hover(&mut self, x: Pixels) {
+        self.hover = self.fraction_at(x);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SliderDrag {
+    Seek,
+    Volume,
 }
 
 impl PlayerBar {
@@ -336,28 +379,86 @@ impl PlayerBar {
         })
         .detach();
 
-        Self { client, playback }
+        Self {
+            client,
+            playback,
+            seek_slider: Slider::default(),
+            volume_slider: Slider::default(),
+            dragging: None,
+            optimistic_seek: None,
+            optimistic_volume: None,
+        }
     }
 }
 
 impl Render for PlayerBar {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = Instant::now();
+        let server_track_uri = self
+            .playback
+            .now_playing
+            .as_ref()
+            .map(|track| track.uri.as_str());
+        if self.optimistic_seek.as_ref().is_some_and(|pending| {
+            now.duration_since(pending.started_at) >= Duration::from_secs(3)
+                || Some(pending.track_uri.as_str()) != server_track_uri
+                || self.playback.position_ms.abs_diff(pending.target_ms) <= 1_000
+        }) {
+            self.optimistic_seek = None;
+        }
+        if self.optimistic_volume.as_ref().is_some_and(|pending| {
+            now.duration_since(pending.started_at) >= Duration::from_secs(3)
+                || self.playback.volume_percent == pending.target_percent
+        }) {
+            self.optimistic_volume = None;
+        }
+
         let playing = self.playback.is_playing;
         let track = self.playback.now_playing.clone();
-        let position = self.playback.position_ms;
+        let position = self
+            .optimistic_seek
+            .as_ref()
+            .map(|pending| {
+                pending.target_ms.saturating_add(if playing {
+                    now.duration_since(pending.started_at).as_millis() as u64
+                } else {
+                    0
+                })
+            })
+            .unwrap_or(self.playback.position_ms);
         let duration = track.as_ref().map(|t| t.duration_ms).unwrap_or(0);
         let progress = if duration > 0 {
             (position as f32 / duration as f32).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let volume = self.playback.volume_percent;
+        let volume = self
+            .optimistic_volume
+            .as_ref()
+            .map(|pending| pending.target_percent)
+            .unwrap_or(self.playback.volume_percent);
+        let displayed_volume = if matches!(self.dragging, Some(SliderDrag::Volume)) {
+            self.volume_slider
+                .hover
+                .map(|value| (value * 100.0).round() as u8)
+                .unwrap_or(volume)
+        } else {
+            volume
+        };
         let client = self.client.clone();
 
         let prev_client = client.clone();
         let play_client = client.clone();
         let next_client = client.clone();
         let volume_client = client.clone();
+        let weak = cx.entity().downgrade();
+        let down_weak = weak.clone();
+        let move_weak = weak.clone();
+        let up_weak = weak.clone();
+        let seek_layout_weak = weak.clone();
+        let volume_layout_weak = weak.clone();
+        let seek_move_weak = weak.clone();
+        let volume_move_weak = weak;
 
         div()
             .id("player-bar")
@@ -371,6 +472,89 @@ impl Render for PlayerBar {
             .bg(rgb(0x000000))
             .border_t_1()
             .border_color(rgb(0x1f1f1f))
+            .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
+                down_weak
+                    .update(cx, |this, cx| {
+                        if this.seek_slider.contains(&event.position) && duration > 0 {
+                            if let Some(fraction) = this.seek_slider.fraction_at(event.position.x) {
+                                this.dragging = Some(SliderDrag::Seek);
+                                this.seek_slider.hover = Some(fraction);
+                            }
+                        }
+                        if this.volume_slider.contains(&event.position) {
+                            this.dragging = Some(SliderDrag::Volume);
+                            this.volume_slider.update_hover(event.position.x);
+                            if let Some(fraction) = this.volume_slider.fraction_at(event.position.x)
+                            {
+                                this.client
+                                    .set_local_volume_percent((fraction * 100.0).round() as u8);
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            })
+            .on_mouse_move(move |event: &MouseMoveEvent, _, cx| {
+                move_weak
+                    .update(cx, |this, cx| {
+                        let seek_drag = matches!(this.dragging, Some(SliderDrag::Seek));
+                        let volume_drag = matches!(this.dragging, Some(SliderDrag::Volume));
+                        if seek_drag || this.seek_slider.contains(&event.position) {
+                            this.seek_slider.update_hover(event.position.x);
+                        } else {
+                            this.seek_slider.hover = None;
+                        }
+                        if volume_drag || this.volume_slider.contains(&event.position) {
+                            this.volume_slider.update_hover(event.position.x);
+                        } else {
+                            this.volume_slider.hover = None;
+                        }
+                        if volume_drag {
+                            if let Some(fraction) = this.volume_slider.fraction_at(event.position.x)
+                            {
+                                this.client
+                                    .set_local_volume_percent((fraction * 100.0).round() as u8);
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            })
+            .on_mouse_up(MouseButton::Left, move |event: &MouseUpEvent, _, cx| {
+                up_weak
+                    .update(cx, |this, cx| {
+                        if matches!(this.dragging, Some(SliderDrag::Seek)) && duration > 0 {
+                            if let Some(bounds) = this.seek_slider.bounds {
+                                let target_ms = (duration as f64
+                                    * slider_fraction(bounds, event.position.x) as f64)
+                                    as u64;
+                                let _ = this.client.seek(target_ms.min(duration));
+                                if let Some(track) = this.playback.now_playing.as_ref() {
+                                    this.optimistic_seek = Some(OptimisticSeek {
+                                        target_ms: target_ms.min(duration),
+                                        started_at: Instant::now(),
+                                        track_uri: track.uri.clone(),
+                                    });
+                                }
+                                this.seek_slider.update_hover(event.position.x);
+                            }
+                        } else if matches!(this.dragging, Some(SliderDrag::Volume)) {
+                            if let Some(bounds) = this.volume_slider.bounds {
+                                let percent = (slider_fraction(bounds, event.position.x) * 100.0)
+                                    .round() as u8;
+                                let _ = this.client.set_volume_percent(percent);
+                                this.optimistic_volume = Some(OptimisticVolume {
+                                    target_percent: percent,
+                                    started_at: Instant::now(),
+                                });
+                                this.volume_slider.update_hover(event.position.x);
+                            }
+                        }
+                        this.dragging = None;
+                        cx.notify();
+                    })
+                    .ok();
+            })
             .child(
                 // Track info
                 div()
@@ -496,18 +680,35 @@ impl Render for PlayerBar {
                                     .child(format_duration(position)),
                             )
                             .child(
-                                div()
-                                    .flex_1()
-                                    .h(px(4.0))
-                                    .rounded_full()
-                                    .bg(rgb(0x4d4d4d))
-                                    .child(
-                                        div()
-                                            .h_full()
-                                            .rounded_full()
-                                            .bg(rgb(0xffffff))
-                                            .w(relative(progress)),
-                                    ),
+                                player_slider(
+                                    "seek-slider",
+                                    progress,
+                                    self.seek_slider.hover,
+                                    matches!(self.dragging, Some(SliderDrag::Seek)),
+                                    self.seek_slider.hover.map(|fraction| {
+                                        format_duration((duration as f64 * fraction as f64) as u64)
+                                    }),
+                                    move |event, cx| {
+                                        seek_move_weak
+                                            .update(cx, |this, cx| {
+                                                if matches!(this.dragging, Some(SliderDrag::Seek))
+                                                    || this.seek_slider.contains(&event.position)
+                                                {
+                                                    this.seek_slider.update_hover(event.position.x);
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    },
+                                    move |bounds, cx| {
+                                        seek_layout_weak
+                                            .update(cx, |this, _| {
+                                                this.seek_slider.bounds = Some(bounds)
+                                            })
+                                            .ok();
+                                    },
+                                )
+                                .flex_1(),
                             )
                             .child(
                                 div()
@@ -539,18 +740,40 @@ impl Render for PlayerBar {
                             .child("−"),
                     )
                     .child(
-                        div()
-                            .w(px(120.0))
-                            .h(px(4.0))
-                            .rounded_full()
-                            .bg(rgb(0x4d4d4d))
-                            .child(
-                                div()
-                                    .h_full()
-                                    .rounded_full()
-                                    .bg(rgb(0xffffff))
-                                    .w(relative(volume as f32 / 100.0)),
-                            ),
+                        player_slider(
+                            "volume-slider",
+                            displayed_volume as f32 / 100.0,
+                            self.volume_slider.hover,
+                            matches!(self.dragging, Some(SliderDrag::Volume)),
+                            None,
+                            move |event, cx| {
+                                volume_move_weak
+                                    .update(cx, |this, cx| {
+                                        if matches!(this.dragging, Some(SliderDrag::Volume))
+                                            || this.volume_slider.contains(&event.position)
+                                        {
+                                            this.volume_slider.update_hover(event.position.x);
+                                            if matches!(this.dragging, Some(SliderDrag::Volume)) {
+                                                if let Some(fraction) =
+                                                    this.volume_slider.fraction_at(event.position.x)
+                                                {
+                                                    this.client.set_local_volume_percent(
+                                                        (fraction * 100.0).round() as u8,
+                                                    );
+                                                }
+                                            }
+                                            cx.notify();
+                                        }
+                                    })
+                                    .ok();
+                            },
+                            move |bounds, cx| {
+                                volume_layout_weak
+                                    .update(cx, |this, _| this.volume_slider.bounds = Some(bounds))
+                                    .ok();
+                            },
+                        )
+                        .w(px(120.0)),
                     )
                     .child(
                         div()
@@ -571,7 +794,7 @@ impl Render for PlayerBar {
                             .text_xs()
                             .text_color(rgb(0xb3b3b3))
                             .w(px(32.0))
-                            .child(format!("{volume}%")),
+                            .child(format!("{displayed_volume}%")),
                     ),
             )
     }
@@ -608,4 +831,108 @@ fn icon_control_button(
 fn format_duration(ms: u64) -> String {
     let total_seconds = ms / 1000;
     format!("{}:{:02}", total_seconds / 60, total_seconds % 60)
+}
+
+fn slider_fraction(bounds: Bounds<Pixels>, x: Pixels) -> f32 {
+    let width: f32 = bounds.size.width.into();
+    let offset: f32 = (x - bounds.origin.x).into();
+    if width <= 0.0 {
+        0.0
+    } else {
+        (offset / width).clamp(0.0, 1.0)
+    }
+}
+
+fn player_slider(
+    id: &'static str,
+    value: f32,
+    hovered_value: Option<f32>,
+    dragging: bool,
+    tooltip: Option<String>,
+    on_pointer_move: impl Fn(&MouseMoveEvent, &mut gpui::App) + 'static,
+    on_bounds: impl FnOnce(Bounds<Pixels>, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let preview = if dragging {
+        hovered_value.unwrap_or(value)
+    } else {
+        value
+    }
+    .clamp(0.0, 1.0);
+    let fill_value = if dragging {
+        preview
+    } else {
+        value.clamp(0.0, 1.0)
+    };
+    let preview_range = hovered_value
+        .filter(|hover| !dragging && *hover > value)
+        .map(|hover| (value, hover - value));
+    let fill_color = if hovered_value.is_some() || dragging {
+        0x1ed760
+    } else {
+        0xffffff
+    };
+
+    div()
+        .id(id)
+        .h(px(12.0))
+        .rounded_full()
+        .cursor_pointer()
+        .flex()
+        .items_center()
+        .on_mouse_move(move |event: &MouseMoveEvent, _, cx| on_pointer_move(event, cx))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(px(4.0))
+                .rounded_full()
+                .bg(rgb(0x4d4d4d)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .h(px(4.0))
+                .rounded_full()
+                .bg(rgb(fill_color))
+                .w(relative(fill_value)),
+        )
+        .children(preview_range.map(|(start, width)| {
+            div()
+                .absolute()
+                .left(relative(start))
+                .h(px(4.0))
+                .rounded_full()
+                .bg(rgb(0xb3b3b3))
+                .w(relative(width))
+        }))
+        .children((hovered_value.is_some() || dragging).then(|| {
+            div()
+                .absolute()
+                .left(relative(preview))
+                .ml(px(-5.0))
+                .size(px(10.0))
+                .rounded_full()
+                .bg(rgb(0xffffff))
+        }))
+        .children(tooltip.map(|text| {
+            div()
+                .absolute()
+                .left(relative(preview))
+                .bottom(px(14.0))
+                .ml(px(-23.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(5.0))
+                .bg(rgb(0x282828))
+                .text_color(rgb(0xffffff))
+                .text_sm()
+                .child(text)
+        }))
+        .child(
+            canvas(move |bounds, _, cx| on_bounds(bounds, cx), |_, _, _, _| {})
+                .absolute()
+                .size_full(),
+        )
 }
