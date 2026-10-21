@@ -95,6 +95,13 @@ Key dependencies:
 - **librespot 0.8** — native Spotify session, Connect protocol and audio playback
 - **reqwest / serde_json** — Pathfinder search
 
+## Development workflow
+
+This project uses spec-driven development. Every feature or architectural change starts with a
+numbered directory under [`specs/`](specs/), containing `spec.md`, `design.md`, and `tasks.md`.
+The specification is the source of truth for intended behavior. See [`AGENTS.md`](AGENTS.md) for
+the agent workflow, native-client constraints, validation commands, and security rules.
+
 ## How it works
 
 1. The app opens Spotify's OAuth page with the desktop client id and a loopback redirect.
