@@ -10,10 +10,8 @@
 //! Unlike React hooks, they don't have the same rules about ordering.
 
 use gpui::{App, AppContext, Window};
-use rspotify::AuthCodePkceSpotify;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
+use crate::lib::spotify::NativeSpotify;
 use crate::router::{PathRouterHandle, StackRouterHandle};
 use crate::state::AppState;
 
@@ -111,6 +109,6 @@ pub fn is_authenticated(cx: &App) -> bool {
 ///     }).detach();
 /// }
 /// ```
-pub fn use_spotify(cx: &App) -> Option<AuthCodePkceSpotify> {
+pub fn use_spotify(cx: &App) -> Option<NativeSpotify> {
     cx.try_global::<AppState>().and_then(|s| s.spotify_client())
 }

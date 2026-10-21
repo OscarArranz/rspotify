@@ -4,8 +4,6 @@ use gpui::{
     Animation, AnimationExt, Context, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, Window, div, ease_in_out, img, px, rgb,
 };
-use rspotify::prelude::OAuthClient;
-use tokio::runtime::Runtime;
 
 use crate::hooks::use_spotify;
 
@@ -45,13 +43,20 @@ impl UserAvatar {
     fn fetch_avatar(&mut self, cx: &mut Context<Self>) {
         if let Some(spotify) = use_spotify(cx) {
             cx.spawn(async move |this, cx| {
-                let rt = Runtime::new().unwrap();
+                let (tx, rx) = futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(spotify.user_profile());
+                });
 
-                let user_data = rt.block_on(async { spotify.me().await }).unwrap();
-                let avatar_url = user_data.images.unwrap().first().unwrap().url.clone();
-
+                let avatar = match rx.await {
+                    Ok(Ok(profile)) => match profile.image_url {
+                        Some(avatar_url) => UserAvatarState::Loaded(avatar_url.into()),
+                        None => UserAvatarState::Error,
+                    },
+                    _ => UserAvatarState::Error,
+                };
                 this.update(cx, |this, cx| {
-                    this.avatar = UserAvatarState::Loaded(avatar_url.into());
+                    this.avatar = avatar;
                     cx.notify();
                 })
                 .ok();
@@ -181,20 +186,7 @@ impl Render for UserAvatar {
                     }
                 }
             }
-            UserAvatarState::Error => {
-                let animated_container = avatar_container.with_animation(
-                    AVATAR_ANIMATION_TYPE,
-                    Animation::new(Duration::from_millis(AVATAR_ANIMATION_DURATION))
-                        .repeat()
-                        .with_easing(ease_in_out),
-                    |div, delta| {
-                        let size = AVATAR_SIZE + (delta * AVATAR_ANIMATION_DELTA_FACTOR);
-                        div.size(px(size))
-                    },
-                );
-
-                main_container.child(animated_container)
-            }
+            UserAvatarState::Error => main_container.child(avatar_container),
         }
     }
 }

@@ -2,10 +2,8 @@
 
 use gpui::{
     App, InteractiveElement, IntoElement, MouseButton, ParentElement, RenderOnce, Styled, Window,
-    div, px, rgb,
+    div, px,
 };
-
-use super::BUTTON_HOVER_BG;
 
 /// Three-dot context menu button.
 #[derive(IntoElement)]

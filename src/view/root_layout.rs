@@ -5,7 +5,7 @@
 //! - The path router for main content
 
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, prelude::*, px, rgb,
+    Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, prelude::*, rgb,
 };
 
 use crate::router::{PathRouter, PathRouterHandle, Route};
@@ -20,7 +20,7 @@ pub struct RootLayout {
 }
 
 impl RootLayout {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Create the path router with routes
         let router = cx.new(|_| {
             PathRouter::new()
@@ -39,7 +39,7 @@ impl RootLayout {
 
         Self {
             router,
-            titlebar: cx.new(|cx| Titlebar::new(cx)),
+            titlebar: cx.new(|cx| Titlebar::new(window, cx)),
         }
     }
 }

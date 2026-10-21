@@ -1,194 +1,142 @@
-# Spotify Client (Rust + GPUI)
+# rspotify — native Spotify client in Rust + GPUI
 
-A lightweight, high-performance Spotify client built with Rust and GPUI, designed to provide the full Spotify experience with significantly lower RAM usage and better performance than the official client while mimicking its interface and features.
+A lightweight Spotify desktop client written in Rust with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui). It uses Spotify's own desktop login and API endpoints — not the public Web API — and plays audio locally through Spotify Connect.
 
-## 🎯 Project Goals
+## Features
 
-- **Performance**: Leverage Rust's efficiency for minimal resource consumption
-- **Native Feel**: Fast, responsive UI using the GPUI GUI framework
-- **Feature Parity**: Implement core Spotify functionality matching the official client
-- **Open Source**: Community-driven development and transparency
+- **Native login**: OAuth against `accounts.spotify.com` using Spotify's desktop client id, then a native session over `login5.spotify.com` via librespot.
+- **Native search**: persisted GraphQL queries against Spotify's Pathfinder endpoint (`api-partner.spotify.com/pathfinder/v1/query`), the same service the official desktop and web clients use.
+- **Local playback**: registers as a Spotify Connect device (`rspotify`) and streams through librespot to the default audio output.
+- **Persistent session**: the refresh token and a stable device id are stored in `~/.cache/rspotify/` so the browser login is only needed once.
+- **Spotify-style UI**: custom titlebar, library sidebar, tabbed search results and a now-playing bar, built with GPUI.
 
-## ⚡ Current Status
+> **Spotify Premium is required for playback.** Free accounts can sign in and search, but Spotify does not permit playback through this kind of client.
 
-**Early Development** - This project is in active development. Currently implemented:
+## Current status
 
-- [ ] Authentication with Spotify Web API
-- [ ] Display user playlists
-- [ ] Playlist detail view
-- [ ] Track playback controls
-- [ ] Search functionality
-- [ ] Album/Artist browsing
-- [ ] Queue management
+| Area | Status |
+| --- | --- |
+| Native OAuth login + refresh | Implemented |
+| Native session (login5/keymaster) | Implemented via librespot |
+| Search (all / songs / artists / albums / playlists / podcasts) | Implemented |
+| Local playback (play / pause / next / previous / seek / volume) | Implemented |
+| User library sidebar | Implemented |
+| Playlist detail, albums, queue, lyrics | Not yet |
 
-## 🚀 Getting Started
+## Requirements
 
-### Prerequisites
+- Rust 1.85+ (edition 2024)
+- A desktop session with a working audio output (PulseAudio/PipeWire/ALSA)
+- A Spotify account
+- Spotify Premium for playback
 
-- Rust 1.70+ ([Install Rust](https://rustup.rs/))
-- Spotify Premium account (required for playback features)
-- Spotify Developer App credentials
-
-### Spotify API Setup
-
-1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-2. Create a new app
-3. Note your **Client ID** and **Client Secret**
-4. Add `http://localhost:8888/callback` to Redirect URIs
-5. Create a `.env` file in the project root:
-
-```env
-SPOTIFY_CLIENT_ID=your_client_id_here
-SPOTIFY_CLIENT_SECRET=your_client_secret_here
-SPOTIFY_REDIRECT_URI=http://localhost:8888/callback
-```
-
-### Installation
+On Linux you may need ALSA development headers for the audio backend:
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/spotify-client
-cd spotify-client
+# Fedora
+sudo dnf install alsa-lib-devel
 
-# Build and run
+# Debian/Ubuntu
+sudo apt install libasound2-dev
+```
+
+## Build and run
+
+```bash
 cargo run --release
 ```
 
-## 🏗️ Architecture
+Then press **Log in with Spotify**. A browser window opens at Spotify's login page; after
+authorising, the loopback callback returns to the app automatically.
 
-The project is structured around three main layers:
+No Spotify Developer app is required. The client uses the same public desktop client id as
+the official client and librespot.
 
+### Configuration
+
+All configuration is optional. Put overrides in `.env` or export them:
+
+```env
+# Override the native client id (only if you know its registered redirect URI)
+RSPOTIFY_NATIVE_CLIENT_ID=65b708073fc0480ea92a077233ca87bd
+
+# Loopback redirect used by the login flow
+RSPOTIFY_REDIRECT_URI=http://127.0.0.1:8898/login
+
+# Where the session token, device id and librespot cache are stored
+RSPOTIFY_STATE_DIR=/home/you/.cache/rspotify
 ```
+
+`~/.cache/rspotify/session.json` is written with owner-only permissions and contains the
+OAuth refresh token. Delete it to sign out.
+
+## Architecture
+
+```text
 src/
-├── main.rs           # Application entry point and GPUI setup
-├── spotify.rs        # Spotify Web API client wrapper
-├── playback.rs       # Audio playback engine (future)
-└── ui/
-    ├── mod.rs        # UI module exports
-    ├── playlist.rs   # Playlist views
-    ├── player.rs     # Playback controls
-    └── search.rs     # Search interface
+├── main.rs                     # GPUI app bootstrap
+├── lib/spotify/
+│   ├── client.rs               # OAuth, librespot session, Connect/player control
+│   ├── search.rs               # Pathfinder persisted-query search
+│   ├── store.rs                # device id + refresh token persistence
+│   └── error.rs                # unified error type
+├── router/                     # path + stack navigation
+├── state/                      # global AppState (client handle)
+└── view/
+    ├── main_layout.rs          # library sidebar + content + player bar
+    ├── screens/search.rs       # search tabs and results
+    ├── screens/sign_in/        # login screen
+    └── components/titlebar/    # Spotify-style titlebar
 ```
 
-### Key Dependencies
+Key dependencies:
 
-- **gpui** - Cross-platform GUI framework
-- **rspotify** - Spotify Web API client
-- **tokio** - Async runtime
-- **librespot** (planned) - Audio playback via Spotify Connect
+- **gpui / gpui-component** — UI
+- **librespot 0.8** — native Spotify session, Connect protocol and audio playback
+- **reqwest / serde_json** — Pathfinder search
 
-## 🎵 Playback Approach
+## How it works
 
-The client will support two playback modes:
+1. The app opens Spotify's OAuth page with the desktop client id and a loopback redirect.
+2. The refresh token is exchanged for an access token and cached.
+3. librespot connects to Spotify using the native access-token flow (login5, keymaster,
+   AP resolver), and registers a Connect device named `rspotify`.
+4. Search is sent to Pathfinder with query hashes extracted from the installed official
+   client. Results are rendered natively.
+5. Pressing play activates the local Connect device and loads the selected track/context.
+   librespot resolves audio keys and streams to the local audio backend.
+6. Playback events update the now-playing bar and progress.
 
-1. **Device Control Mode** (Current)
-   - Control playback on existing Spotify devices
-   - Uses official Web API (ToS compliant)
-   - Requires another device running Spotify
+See [`docs/reverse-engineering.md`](docs/reverse-engineering.md) for the observed endpoints,
+client id, Pathfinder query hashes and which parts are confirmed versus inferred.
 
-2. **Integrated Playback** (Planned)
-   - Direct audio playback using librespot
-   - Registers as a Spotify Connect device
-   - Full offline support and lower latency
+## Roadmap
 
-## 🛠️ Development
+- [ ] Playlist detail view and queue
+- [ ] Album/artist pages
+- [x] Liked Songs collection playback
+- [ ] Lyrics
+- [ ] Keyboard shortcuts and system media controls
+- [ ] Offline cache controls and audio quality settings
 
-### Running in Development
+## Legal
 
-```bash
-cargo run
-```
+This is an unofficial client and is not affiliated with Spotify.
 
-### Building for Release
+- Using a client id that belongs to Spotify's official client, and using librespot, may
+  violate Spotify's Terms of Service and can put your account at risk.
+- A Spotify Premium subscription is required for playback.
+- No DRM circumvention or premium bypass is implemented; playback uses librespot's
+  implementation of Spotify's native protocol with a valid account.
+- The project is provided for educational and personal use.
 
-```bash
-cargo build --release
-```
+## Acknowledgements
 
-The optimized binary will be available at `target/release/spotify-client`
+- [librespot](https://github.com/librespot-org/librespot)
+- [GPUI](https://github.com/zed-industries/zed)
+- [gpui-component](https://github.com/longbridge/gpui-component)
+- The Rust community
 
-### Code Style
+## License
 
-This project uses standard Rust formatting:
-
-```bash
-cargo fmt
-cargo clippy
-```
-
-## 🤝 Contributing
-
-Contributions are welcome! This project is in early stages, and there's plenty to build.
-
-### Areas for Contribution
-
-- UI/UX improvements
-- Additional Spotify API features
-- Performance optimizations
-- Cross-platform testing
-- Documentation
-
-Please open an issue before starting work on major features.
-
-## 📋 Roadmap
-
-### Phase 1: Foundation (Current)
-- [x] Project setup
-- [ ] Basic authentication flow
-- [ ] Playlist listing
-- [ ] Simple UI layout
-
-### Phase 2: Core Features
-- [ ] Track playback controls
-- [ ] Search functionality
-- [ ] Album and artist views
-- [ ] Queue management
-- [ ] Playlist editing
-
-### Phase 3: Advanced Features
-- [ ] Integrated playback (librespot)
-- [ ] Offline mode
-- [ ] Custom themes
-- [ ] Keyboard shortcuts
-- [ ] System media controls integration
-
-### Phase 4: Polish
-- [ ] Performance profiling and optimization
-- [ ] Cross-platform packaging
-- [ ] User preferences and settings
-- [ ] Lyrics support
-- [ ] Social features (friend activity)
-
-## 📊 Performance Goals
-
-Target metrics compared to official Spotify client:
-
-- **RAM Usage**: < 150MB (vs ~500MB for official client)
-- **Startup Time**: < 2s
-- **CPU Usage (idle)**: < 1%
-- **Binary Size**: < 30MB
-
-## ⚖️ Legal & Licensing
-
-This project is licensed under the MIT License - see LICENSE file for details.
-
-**Important Notes:**
-- This is an unofficial client and is not affiliated with Spotify
-- Using librespot may violate Spotify's Terms of Service
-- Requires a Spotify Premium subscription for full functionality
-- This project is for educational purposes and personal use
-
-## 🙏 Acknowledgments
-
-- [librespot](https://github.com/librespot-org/librespot) - Spotify streaming library
-- [rspotify](https://github.com/ramsayleung/rspotify) - Spotify Web API wrapper
-- [gpui](https://github.com/zed-industries/zed/tree/main/crates/gpui) - GUI framework
-- The Rust community for excellent tooling and libraries
-
-## 📫 Contact
-
-For questions or suggestions, please open an issue on GitHub.
-
----
-
-**Status**: 🚧 Early Development | **License**: MIT | **Language**: Rust 🦀
+MIT — see [LICENSE.md](LICENSE.md).

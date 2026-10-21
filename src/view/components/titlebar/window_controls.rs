@@ -17,15 +17,23 @@ impl WindowControls {
     }
 
     fn get_font() -> &'static str {
-        use windows::Wdk::System::SystemServices::RtlGetVersion;
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Wdk::System::SystemServices::RtlGetVersion;
 
-        let mut version = unsafe { std::mem::zeroed() };
-        let status = unsafe { RtlGetVersion(&mut version) };
+            let mut version = unsafe { std::mem::zeroed() };
+            let status = unsafe { RtlGetVersion(&mut version) };
 
-        if status.is_ok() && version.dwBuildNumber >= 22000 {
-            "Segoe Fluent Icons"
-        } else {
-            "Segoe MDL2 Assets"
+            if status.is_ok() && version.dwBuildNumber >= 22000 {
+                "Segoe Fluent Icons"
+            } else {
+                "Segoe MDL2 Assets"
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            "sans-serif"
         }
     }
 }

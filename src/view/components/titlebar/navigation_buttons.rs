@@ -1,16 +1,14 @@
 //! Back and Forward navigation buttons component.
 
 use gpui::{
-    App, Div, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement, RenderOnce,
-    Stateful, Styled, Window, div, hsla, prelude::FluentBuilder, px, rgb,
+    App, Div, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement, Stateful,
+    Styled, Window, div, prelude::FluentBuilder, px,
 };
 
 use crate::{
     hooks::use_stack_nav,
     view::components::icons::{back_icon, forward_icon},
 };
-
-use super::BUTTON_HOVER_BG;
 
 struct NavigationButtonsState {
     back_button_is_hovered: bool,

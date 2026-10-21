@@ -25,6 +25,8 @@ use gpui::{
 };
 
 use crate::hooks::is_authenticated;
+use crate::router::StackRouterHandle;
+use crate::state::AppState;
 use crate::view::components::titlebar::friends_button::friends_button;
 use crate::view::components::titlebar::home_button::home_button;
 use crate::view::components::titlebar::navigation_buttons::navigation_buttons;
@@ -65,13 +67,45 @@ impl Render for TitleBarState {
 /// Custom Spotify-style titlebar component.
 pub struct Titlebar {
     user_avatar: Entity<UserAvatar>,
+    search_bar: Entity<SearchBar>,
+    _auth_subscription: gpui::Subscription,
+    _stack_global_subscription: gpui::Subscription,
+    _stack_subscription: Option<gpui::Subscription>,
 }
 
 impl Titlebar {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Re-render when login/logout changes the global auth state so the
+        // authenticated controls (search, avatar, navigation) appear immediately.
+        let auth_subscription = cx.observe_global::<AppState>(|_, cx| cx.notify());
+        // The stack router is created with the main layout after login. Observe
+        // the global so we can subscribe to the router once it exists.
+        let stack_global_subscription = cx.observe_global::<StackRouterHandle>(|this, cx| {
+            this.subscribe_to_stack(cx);
+            cx.notify();
+        });
+
+        let mut titlebar = Self {
             user_avatar: cx.new(|_| UserAvatar::new()),
+            search_bar: cx.new(|cx| SearchBar::new(window, cx)),
+            _auth_subscription: auth_subscription,
+            _stack_global_subscription: stack_global_subscription,
+            _stack_subscription: None,
+        };
+        titlebar.subscribe_to_stack(cx);
+        titlebar
+    }
+
+    /// Re-render when the stack changes so the back/forward buttons update.
+    fn subscribe_to_stack(&mut self, cx: &mut Context<Self>) {
+        if self._stack_subscription.is_some() {
+            return;
         }
+        let Some(handle) = cx.try_global::<StackRouterHandle>().cloned() else {
+            return;
+        };
+        let router = handle.entity();
+        self._stack_subscription = Some(cx.observe(&router, |_, _, cx| cx.notify()));
     }
 }
 
@@ -137,7 +171,7 @@ impl Render for Titlebar {
                         .gap(px(8.0))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(home_button(window, cx))
-                        .child(SearchBar::new()),
+                        .child(self.search_bar.clone()),
                 )
             })
             .child(

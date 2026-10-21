@@ -7,7 +7,7 @@ use gpui::{
     Along, AnyElement, App, AppContext, Axis, Bounds, Context, Div, Element, ElementId, Empty,
     Entity, EventEmitter, InteractiveElement as _, IntoElement, IsZero as _, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Render, RenderOnce, Style, Styled, Window, div,
-    prelude::FluentBuilder, px,
+    prelude::FluentBuilder,
 };
 use gpui_component::StyledExt;
 

@@ -1,8 +1,8 @@
 //! Friends/users button component.
 
 use gpui::{
-    App, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    App, Entity, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled, Window, div, px,
 };
 
 use crate::view::components::icons::friends_outlined_icon;

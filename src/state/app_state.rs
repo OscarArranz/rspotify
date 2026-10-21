@@ -4,7 +4,8 @@
 //! all components without prop drilling.
 
 use gpui::Global;
-use rspotify::AuthCodePkceSpotify;
+
+use crate::lib::spotify::NativeSpotify;
 
 /// Global application state accessible from any component.
 ///
@@ -23,9 +24,8 @@ use rspotify::AuthCodePkceSpotify;
 /// ```
 #[derive(Clone, Default)]
 pub struct AppState {
-    /// The authenticated Spotify client.
-    /// Wrapped in Arc<Mutex> for thread-safe access and async operations.
-    spotify: Option<AuthCodePkceSpotify>,
+    /// The authenticated native Spotify client.
+    spotify: Option<NativeSpotify>,
 }
 
 impl Global for AppState {}
@@ -42,13 +42,13 @@ impl AppState {
     }
 
     /// Sets the authenticated Spotify client.
-    pub fn set_spotify_client(&mut self, client: AuthCodePkceSpotify) {
+    pub fn set_spotify_client(&mut self, client: NativeSpotify) {
         self.spotify = Some(client);
     }
 
     /// Gets a clone of the Spotify client handle.
     /// Returns None if not authenticated.
-    pub fn spotify_client(&self) -> Option<AuthCodePkceSpotify> {
+    pub fn spotify_client(&self) -> Option<NativeSpotify> {
         self.spotify.clone()
     }
 

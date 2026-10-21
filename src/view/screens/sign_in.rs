@@ -37,7 +37,13 @@ impl Render for SignInScreen {
                     .child(
                         div()
                             .text_color(rgb(0xb3b3b3))
-                            .child("Sign in to access your music"),
+                            .child("Sign in with your Spotify account to continue"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x8a8a8a))
+                            .child("A Spotify Premium subscription is required for playback."),
                     )
                     .child(SignInButton::new()),
             )

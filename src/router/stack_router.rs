@@ -91,10 +91,12 @@ impl StackRouter {
     /// Replaces the current screen with a new one.
     /// Similar to React Navigation's navigation.replace().
     pub fn replace(&mut self, screen: AnyView, cx: &mut Context<Self>) {
-        if !self.screens.is_empty() {
-            self.screens.pop();
+        if let Some(slot) = self.screens.get_mut(self.current_screen) {
+            *slot = screen;
+        } else {
+            self.screens.push(screen);
+            self.current_screen = self.screens.len().saturating_sub(1);
         }
-        self.screens.push(screen);
         cx.notify();
     }
 
@@ -103,6 +105,7 @@ impl StackRouter {
     pub fn reset(&mut self, screen: AnyView, cx: &mut Context<Self>) {
         self.screens.clear();
         self.screens.push(screen);
+        self.current_screen = 0;
         cx.notify();
     }
 
@@ -118,7 +121,7 @@ impl StackRouter {
 
     /// Returns true if we can go forward (more than one screen).
     pub fn can_go_forward(&self) -> bool {
-        self.current_screen < self.screens.len() - 1
+        self.current_screen + 1 < self.screens.len()
     }
 }
 
