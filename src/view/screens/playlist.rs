@@ -256,7 +256,9 @@ impl PlaylistScreen {
         let new_len = detail.tracks.len();
         let added_at = &detail.added_at;
         for track in &mut detail.tracks[old_len..new_len] {
-            track.added_at_ms = added_at.get(&track.uri).copied();
+            if let Some(timestamp) = added_at.get(&track.uri).copied() {
+                track.added_at_ms = Some(timestamp);
+            }
         }
         if detail.next_page_url.is_none() && detail.track_count.is_none() {
             detail.track_count = Some(new_len);
@@ -745,7 +747,8 @@ impl PlaylistScreen {
                             .focus_bordered(false)
                             .cleanable(true)
                             .flex_1()
-                            .min_w(px(0.0)),
+                            .min_w(px(0.0))
+                            .text_color(rgb(0xffffff)),
                     )
                     .child(
                         div()
@@ -1190,7 +1193,7 @@ impl Render for PlaylistScreen {
     }
 }
 
-fn render_cover(url: Option<&str>, size: f32, liked: bool, accent: u32) -> AnyElement {
+pub(crate) fn render_cover(url: Option<&str>, size: f32, liked: bool, accent: u32) -> AnyElement {
     match url {
         Some(url) if !url.is_empty() => img(url.to_string())
             .size(px(size))

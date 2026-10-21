@@ -10,7 +10,7 @@ use crate::lib::spotify::{LibraryPlaylist, NativeSpotify, PlaybackSnapshot, Play
 use crate::router::{StackRouter, StackRouterHandle};
 use crate::state::AppState;
 use crate::view::components::resizable::{h_resizable, resizable_panel};
-use crate::view::screens::playlist::PlaylistScreen;
+use crate::view::screens::playlist::{PlaylistScreen, render_cover};
 
 const PANEL_MARGIN: f32 = 9.0;
 
@@ -167,17 +167,12 @@ impl Render for LibrarySidebar {
                         cx.new(|cx| PlaylistScreen::new(source.clone(), client.clone(), cx));
                     router.push(screen.into(), cx);
                 })
-                .child(match &entry.image_url {
-                    Some(url) => img(url.clone())
-                        .size(px(40.0))
-                        .rounded(px(4.0))
-                        .into_any_element(),
-                    None => div()
-                        .size(px(40.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(0x282828))
-                        .into_any_element(),
-                })
+                .child(render_cover(
+                    entry.image_url.as_deref(),
+                    40.0,
+                    false,
+                    0x3a2d64,
+                ))
                 .child(
                     div()
                         .flex()

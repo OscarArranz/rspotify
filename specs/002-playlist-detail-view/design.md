@@ -32,14 +32,18 @@ gradient fading into `#121212` from roughly `14% 12%`.
    blocks on the native runtime:
    - `Playlist::get(session, playlist_uri)` for name, description, owner username, cover sizes,
      item order, and added-at timestamps.
-   - `SpClient::get_context(context_uri)` for the first context pages and track metadata.
+   - `SpClient::get_context(context_uri)` for context order, `added_at`, total count, and pagination.
+   - Native extended metadata (`TRACK_V4` / `EPISODE_V4`) in bounded batches when context rows do
+     not include display metadata. This is especially important for Liked Songs, whose context
+     contains URIs and `added_at` but no title, artist, album, duration, or image fields.
    - `get_user_profile(owner, None, None)` for the owner display name/avatar.
    - For Liked Songs, the current profile replaces the playlist owner and
      `spotify:user:<username>:collection` is the context URI.
    - The cover image is fetched and sampled on the worker to produce a header accent colour.
 3. Results return through a `oneshot` channel and are applied in `cx.spawn`.
-4. When the list scrolls near the end, `PlaylistScreen` fetches `next_page_url` on another worker
-   and appends parsed tracks through `ListState::splice`.
+4. Context-page tracks are hydrated through the same batched native metadata path. When the list
+   scrolls near the end, `PlaylistScreen` fetches `next_page_url` on another worker and appends
+   parsed tracks through `ListState::splice`.
 5. A 250 ms poll copies `NativeSpotify::playback()` into the screen and notifies only when the
    snapshot changes.
 
@@ -47,10 +51,13 @@ gradient fading into `#121212` from roughly `14% 12%`.
 
 - `PlaylistItem.id.to_uri()` keys added-at timestamps; `PlaylistItemAttributes.timestamp`
   provides milliseconds. Missing or zero timestamps are treated as unknown.
-- Context track `uri` is the stable identity. Metadata keys are read defensively:
-  `title`, `artist_name`, `album_name`, `image_url`, `duration`, `is_explicit`, `is_playable`.
-  Episode contexts fall back to `episode_name` / `show_name`.
-- Image IDs (`spotify:image:…`) become `https://i.scdn.co/image/…`.
+- Context track `uri` is the stable identity. Context metadata keys are read defensively:
+  `title`, `artist_name`, `album_name`, `image_url`, `duration`, `is_explicit`, `is_playable`, and
+  `added_at`. If display fields are missing, bounded extended-metadata requests hydrate tracks and
+  episodes from their native protobuf records. Track cover art comes from the album cover group;
+  episode art comes from the episode cover image group.
+- Image IDs (`spotify:image:…`) and raw 20-byte playlist picture IDs become
+  `https://i.scdn.co/image/…`.
 - Total duration uses context metadata (`duration`, `total_duration`, or
   `total_duration_ms`) when present. Otherwise it is omitted rather than guessed.
 - Song count uses the playlist `length` or context `total_tracks`. If it is still unknown while
@@ -113,6 +120,8 @@ return a playlist cover for the collection URI.
 - A failed next-page request leaves the loaded tracks intact, shows the error in the action bar, and
   is retried the next time the user scrolls near the end.
 - Missing artwork, owner name, description, duration, or added-at timestamp degrades gracefully.
+  Some playlists contain no cover ID in either rootlist metadata or `Playlist::get`; their artwork
+  cannot be recovered from those endpoints and uses the existing placeholder.
 - Cover-colour fetch/decode failure falls back to a fixed purple accent.
 - The screen remains interactive while pagination runs; duplicate page requests are guarded by
   `next_page_loading`.

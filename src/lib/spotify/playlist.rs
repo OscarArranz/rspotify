@@ -4,18 +4,28 @@
 //! (`Playlist::get`). Track metadata and pagination come from the native
 //! context-resolve endpoint (`SpClient::get_context` / `get_next_page`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use librespot::core::{Session, SpotifyUri};
 use librespot::metadata::{Metadata, Playlist};
-use librespot::protocol::{context::Context, context_track::ContextTrack};
+use librespot::protocol::{
+    context::Context,
+    context_track::ContextTrack,
+    extended_metadata::{BatchedEntityRequest, EntityRequest, ExtensionQuery},
+    extension_kind::ExtensionKind,
+    metadata::{Episode as EpisodeMessage, Track as TrackMessage},
+};
+use protobuf::{EnumOrUnknown, Message};
 use serde_json::Value;
 
 use super::error::SpotifyError;
 
 const FALLBACK_ACCENT: u32 = 0x5c44c7;
 const LIKED_ACCENT: u32 = 0x4b1fd0;
+/// Extended-metadata accepts at least 1,000 entities per request. Stay well below
+/// that limit so large collections do not hit the endpoint's 413 response.
+const METADATA_BATCH_SIZE: usize = 500;
 
 /// A screen source before the full playlist payload has loaded.
 #[derive(Clone, Debug)]
@@ -116,7 +126,9 @@ pub async fn fetch_playlist_page(
         .map_err(|error| SpotifyError::Api(error.to_string()))?;
     let value: Value = serde_json::from_slice(&bytes)
         .map_err(|error| SpotifyError::Api(format!("context page JSON: {error}")))?;
-    Ok(parse_json_page(&value))
+    let mut page = parse_json_page(&value);
+    hydrate_tracks(session, &mut page.tracks).await;
+    Ok(page)
 }
 
 async fn fetch_saved_playlist(
@@ -157,7 +169,8 @@ async fn fetch_saved_playlist(
         .map_err(|error| SpotifyError::Api(error.to_string()))?;
 
     let added_at = added_at_by_uri(&playlist);
-    let (tracks, next_page_url) = context_tracks(&context, &added_at);
+    let (mut tracks, next_page_url) = context_tracks(&context, &added_at);
+    hydrate_tracks(session, &mut tracks).await;
     let name = non_empty(&playlist.attributes.name)
         .map(ToOwned::to_owned)
         .unwrap_or(preview_name);
@@ -197,7 +210,8 @@ async fn fetch_liked_songs(session: &Session) -> Result<PlaylistDetail, SpotifyE
         .await
         .map_err(|error| SpotifyError::Api(error.to_string()))?;
     let (owner_name, owner_image_url) = fetch_profile(session, &username).await;
-    let (tracks, next_page_url) = context_tracks(&context, &HashMap::new());
+    let (mut tracks, next_page_url) = context_tracks(&context, &HashMap::new());
+    hydrate_tracks(session, &mut tracks).await;
     let track_count = context_track_count(&context)
         .map(|count| count.max(tracks.len()))
         .or_else(|| next_page_url.is_none().then_some(tracks.len()));
@@ -220,14 +234,15 @@ async fn fetch_liked_songs(session: &Session) -> Result<PlaylistDetail, SpotifyE
 }
 
 fn playlist_image(playlist: &Playlist) -> Option<String> {
-    playlist
+    let from_sizes = playlist
         .attributes
         .picture_sizes
         .iter()
         .filter(|size| !size.url.is_empty())
         .max_by_key(|size| size.target_name.parse::<u32>().unwrap_or(0))
         .map(|size| image_url_from_id(&size.url))
-        .filter(|url| !url.is_empty())
+        .filter(|url| !url.is_empty());
+    from_sizes.or_else(|| image_url_from_picture(&playlist.attributes.picture))
 }
 
 fn added_at_by_uri(playlist: &Playlist) -> HashMap<String, i64> {
@@ -260,12 +275,6 @@ fn context_tracks(
         }
     }
     (tracks, next_page_url)
-}
-
-fn track_from_context(track: &ContextTrack, added_at: &HashMap<String, i64>) -> PlaylistTrack {
-    let uri = track.uri.clone().unwrap_or_default();
-    let metadata = &track.metadata;
-    track_from_metadata(&uri, metadata, added_at.get(&uri).copied())
 }
 
 fn track_from_metadata(
@@ -314,6 +323,235 @@ fn track_from_metadata(
     }
 }
 
+fn track_from_context(track: &ContextTrack, added_at: &HashMap<String, i64>) -> PlaylistTrack {
+    let uri = track.uri.clone().unwrap_or_default();
+    let metadata = &track.metadata;
+    let added_at_ms = added_at.get(&uri).copied().or_else(|| {
+        metadata_value(metadata, &["added_at"]).and_then(|value| parse_timestamp_ms(&value))
+    });
+    track_from_metadata(&uri, metadata, added_at_ms)
+}
+
+#[derive(Clone, Debug, Default)]
+struct HydratedTrack {
+    title: String,
+    artist: String,
+    album: String,
+    image_url: Option<String>,
+    duration_ms: u64,
+    explicit: bool,
+}
+
+/// Fills in titles, artists, albums, artwork, and durations for context tracks
+/// that only carry URIs. Collection contexts and some playlist context pages
+/// return `added_at` but no display metadata, so it is fetched in large batches
+/// from the native extended-metadata endpoint.
+async fn hydrate_tracks(session: &Session, tracks: &mut [PlaylistTrack]) {
+    let mut track_uris = Vec::new();
+    let mut episode_uris = Vec::new();
+    let mut seen = HashSet::new();
+
+    for track in tracks.iter() {
+        if !needs_metadata(track) || !seen.insert(track.uri.clone()) {
+            continue;
+        }
+        if track.uri.starts_with("spotify:track:") {
+            track_uris.push(track.uri.clone());
+        } else if track.uri.starts_with("spotify:episode:") {
+            episode_uris.push(track.uri.clone());
+        }
+    }
+
+    let mut hydrated = HashMap::new();
+    for chunk in track_uris.chunks(METADATA_BATCH_SIZE) {
+        match fetch_metadata_batch(session, chunk, ExtensionKind::TRACK_V4).await {
+            Ok(entries) => hydrated.extend(entries),
+            Err(error) => eprintln!("playlist track metadata batch failed: {error}"),
+        }
+    }
+    for chunk in episode_uris.chunks(METADATA_BATCH_SIZE) {
+        match fetch_metadata_batch(session, chunk, ExtensionKind::EPISODE_V4).await {
+            Ok(entries) => hydrated.extend(entries),
+            Err(error) => eprintln!("playlist episode metadata batch failed: {error}"),
+        }
+    }
+
+    if hydrated.is_empty() {
+        return;
+    }
+    for track in tracks.iter_mut() {
+        if let Some(metadata) = hydrated.get(&track.uri) {
+            apply_hydrated(track, metadata);
+        }
+    }
+}
+
+fn needs_metadata(track: &PlaylistTrack) -> bool {
+    (track.uri.starts_with("spotify:track:") || track.uri.starts_with("spotify:episode:"))
+        && (track.title.is_empty()
+            || track.title == "Unknown track"
+            || track.artist.is_empty()
+            || track.image_url.is_none()
+            || track.duration_ms == 0)
+}
+
+async fn fetch_metadata_batch(
+    session: &Session,
+    uris: &[String],
+    kind: ExtensionKind,
+) -> Result<HashMap<String, HydratedTrack>, SpotifyError> {
+    let request = BatchedEntityRequest {
+        entity_request: uris
+            .iter()
+            .map(|uri| EntityRequest {
+                entity_uri: uri.clone(),
+                query: vec![ExtensionQuery {
+                    extension_kind: EnumOrUnknown::new(kind),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let response = session
+        .spclient()
+        .get_extended_metadata(request)
+        .await
+        .map_err(|error| SpotifyError::Api(error.to_string()))?;
+
+    let mut hydrated = HashMap::new();
+    for array in response.extended_metadata {
+        let array_kind = array.extension_kind.enum_value().ok();
+        for data in array.extension_data {
+            if data
+                .header
+                .as_ref()
+                .is_some_and(|header| header.status_code != 0 && header.status_code != 200)
+            {
+                continue;
+            }
+            let uri = data.entity_uri;
+            let Some(any) = data.extension_data.as_ref() else {
+                continue;
+            };
+            if uri.is_empty() {
+                continue;
+            }
+            let metadata = match array_kind {
+                Some(ExtensionKind::TRACK_V4) => TrackMessage::parse_from_bytes(&any.value)
+                    .ok()
+                    .and_then(|message| hydrated_track_from_message(&message)),
+                Some(ExtensionKind::EPISODE_V4) => EpisodeMessage::parse_from_bytes(&any.value)
+                    .ok()
+                    .and_then(|message| hydrated_episode_from_message(&message)),
+                _ => None,
+            };
+            if let Some(metadata) = metadata {
+                hydrated.insert(uri, metadata);
+            }
+        }
+    }
+    Ok(hydrated)
+}
+
+fn hydrated_track_from_message(track: &TrackMessage) -> Option<HydratedTrack> {
+    let title = track.name().trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let artist = track
+        .artist
+        .iter()
+        .filter_map(|artist| non_empty(artist.name()))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let album = track
+        .album
+        .as_ref()
+        .map(|album| album.name().trim().to_string())
+        .unwrap_or_default();
+    let image_url = track.album.as_ref().and_then(album_image_url);
+
+    Some(HydratedTrack {
+        title,
+        artist,
+        album,
+        image_url,
+        duration_ms: track.duration().max(0) as u64,
+        explicit: track.explicit(),
+    })
+}
+
+fn hydrated_episode_from_message(episode: &EpisodeMessage) -> Option<HydratedTrack> {
+    let title = episode.name().trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let show_name = episode
+        .show
+        .as_ref()
+        .map(|show| show.name().trim().to_string())
+        .unwrap_or_default();
+    let image_url = episode.cover_image.as_ref().and_then(image_group_url);
+
+    Some(HydratedTrack {
+        title,
+        artist: show_name.clone(),
+        album: show_name,
+        image_url,
+        duration_ms: episode.duration().max(0) as u64,
+        explicit: episode.explicit(),
+    })
+}
+
+fn album_image_url(album: &librespot::protocol::metadata::Album) -> Option<String> {
+    let group_image = album
+        .cover_group
+        .as_ref()
+        .map(|group| group.image.iter().max_by_key(image_area))
+        .unwrap_or(None);
+    group_image
+        .or_else(|| album.cover.iter().max_by_key(image_area))
+        .and_then(image_message_url)
+}
+
+fn image_group_url(group: &librespot::protocol::metadata::ImageGroup) -> Option<String> {
+    group
+        .image
+        .iter()
+        .max_by_key(image_area)
+        .and_then(image_message_url)
+}
+
+fn image_area(image: &&librespot::protocol::metadata::Image) -> i32 {
+    image.width().max(0).saturating_mul(image.height().max(0))
+}
+
+fn image_message_url(image: &librespot::protocol::metadata::Image) -> Option<String> {
+    image.file_id.as_deref().and_then(image_url_from_picture)
+}
+
+fn apply_hydrated(track: &mut PlaylistTrack, metadata: &HydratedTrack) {
+    if !metadata.title.is_empty() {
+        track.title = metadata.title.clone();
+    }
+    if !metadata.artist.is_empty() {
+        track.artist = metadata.artist.clone();
+    }
+    if !metadata.album.is_empty() {
+        track.album = metadata.album.clone();
+    }
+    if metadata.image_url.is_some() {
+        track.image_url = metadata.image_url.clone();
+    }
+    if metadata.duration_ms > 0 {
+        track.duration_ms = metadata.duration_ms;
+    }
+    track.explicit |= metadata.explicit;
+}
+
 fn parse_json_page(value: &Value) -> PlaylistPage {
     let mut tracks = Vec::new();
     if let Some(items) = value.get("tracks").and_then(Value::as_array) {
@@ -331,7 +569,10 @@ fn parse_json_page(value: &Value) -> PlaylistPage {
                         .collect::<HashMap<_, _>>()
                 })
                 .unwrap_or_default();
-            tracks.push(track_from_metadata(uri, &metadata, None));
+            let added_at_ms = metadata
+                .get("added_at")
+                .and_then(|value| parse_timestamp_ms(value));
+            tracks.push(track_from_metadata(uri, &metadata, added_at_ms));
         }
     }
 
@@ -380,6 +621,21 @@ fn parse_millis(value: &str) -> Option<u64> {
         .or_else(|| value.parse::<f64>().ok().map(|value| value.max(0.0) as u64))
 }
 
+fn parse_timestamp_ms(value: &str) -> Option<i64> {
+    let raw = value
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .or_else(|| value.trim().parse::<f64>().ok().map(|value| value as i64))?;
+    (raw > 0).then(|| {
+        if raw < 10_000_000_000 {
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        }
+    })
+}
+
 fn metadata_value(metadata: &HashMap<String, String>, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| metadata.get(*key))
@@ -400,6 +656,18 @@ fn image_url_from_id(id: &str) -> String {
     } else {
         format!("https://i.scdn.co/image/{id}")
     }
+}
+
+fn image_url_from_picture(bytes: &[u8]) -> Option<String> {
+    if bytes.len() != 20 {
+        return None;
+    }
+    let id = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let url = image_url_from_id(&id);
+    (!url.is_empty()).then_some(url)
 }
 
 async fn fetch_profile(session: &Session, username: &str) -> (String, Option<String>) {
@@ -588,7 +856,8 @@ mod tests {
                         "title": "One",
                         "artist_name": "Artist",
                         "album_name": "Album",
-                        "duration": "180000"
+                        "duration": "180000",
+                        "added_at": "1791840911000"
                     }
                 },
                 {
@@ -606,6 +875,7 @@ mod tests {
         let page = parse_json_page(&value);
         assert_eq!(page.tracks.len(), 2);
         assert_eq!(page.tracks[0].title, "One");
+        assert_eq!(page.tracks[0].added_at_ms, Some(1_791_840_911_000));
         assert_eq!(page.tracks[1].title, "Episode");
         assert_eq!(page.tracks[1].artist, "Show");
         assert!(!page.tracks[1].playable);
@@ -613,6 +883,67 @@ mod tests {
             page.next_page_url.as_deref(),
             Some("hm:/context-resolve/v1/next")
         );
+    }
+
+    #[test]
+    fn hydrates_track_metadata_from_protobuf() {
+        use librespot::protocol::metadata::{Album, Artist, Image, ImageGroup};
+        use protobuf::MessageField;
+
+        let mut image = Image::new();
+        image.file_id = Some(vec![0xab; 20]);
+        image.width = Some(300);
+        image.height = Some(300);
+        let mut cover_group = ImageGroup::new();
+        cover_group.image.push(image);
+
+        let mut album = Album::new();
+        album.name = Some("Album".to_string());
+        album.cover_group = MessageField::some(cover_group);
+
+        let mut artist = Artist::new();
+        artist.name = Some("Artist".to_string());
+
+        let mut message = TrackMessage::new();
+        message.name = Some("Title".to_string());
+        message.album = MessageField::some(album);
+        message.artist.push(artist);
+        message.duration = Some(123_456);
+        message.explicit = Some(true);
+
+        let hydrated = hydrated_track_from_message(&message).expect("hydrated track");
+        assert_eq!(hydrated.title, "Title");
+        assert_eq!(hydrated.artist, "Artist");
+        assert_eq!(hydrated.album, "Album");
+        assert_eq!(hydrated.duration_ms, 123_456);
+        assert!(hydrated.explicit);
+        let expected_image = format!("https://i.scdn.co/image/{}", "ab".repeat(20));
+        assert_eq!(hydrated.image_url.as_deref(), Some(expected_image.as_str()));
+    }
+
+    #[test]
+    fn reads_added_at_from_collection_context() {
+        let mut track = ContextTrack::new();
+        track.uri = Some("spotify:track:one".to_string());
+        track
+            .metadata
+            .insert("added_at".to_string(), "1791840911000".to_string());
+
+        let track = track_from_context(&track, &HashMap::new());
+        assert_eq!(track.added_at_ms, Some(1_791_840_911_000));
+        assert_eq!(parse_timestamp_ms("1791840911"), Some(1_791_840_911_000));
+        assert_eq!(parse_timestamp_ms("0"), None);
+    }
+
+    #[test]
+    fn builds_image_url_from_raw_picture_id() {
+        let expected = format!("https://i.scdn.co/image/{}", "ab".repeat(20));
+        assert_eq!(
+            image_url_from_picture(&[0xab; 20]).as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(image_url_from_picture(&[]), None);
+        assert_eq!(image_url_from_picture(&[0xab; 19]), None);
     }
 
     #[test]

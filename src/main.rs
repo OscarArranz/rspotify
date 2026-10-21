@@ -81,6 +81,9 @@ fn main() {
 
             // Initialize GPUI component
             gpui_component::init(cx);
+            // The app uses dark Spotify surfaces regardless of the OS appearance.
+            // Input text is rendered from the component theme's foreground color.
+            gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
 
             let bounds = Bounds::centered(None, size(px(1400.), px(800.0)), cx);
 

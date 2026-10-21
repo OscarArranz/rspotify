@@ -73,7 +73,8 @@ impl Render for SearchBar {
                     .bordered(false)
                     .focus_bordered(false)
                     .cleanable(true)
-                    .w_full(),
+                    .w_full()
+                    .text_color(rgb(0xffffff)),
             )
     }
 }

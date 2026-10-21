@@ -353,12 +353,25 @@ impl NativeSpotify {
                         .filter(|name| !name.is_empty())
                         .unwrap_or_else(|| "Playlist".to_string());
                     let image_url = attributes.and_then(|attributes| {
-                        attributes
+                        let from_sizes = attributes
                             .picture_size
                             .iter()
-                            .find_map(|size| size.url.clone().filter(|url| !url.is_empty()))
-                            .map(|url| image_url_from_id(&url))
-                            .filter(|url| !url.is_empty())
+                            .filter(|size| size.url.as_deref().is_some_and(|url| !url.is_empty()))
+                            .max_by_key(|size| {
+                                size.target_name
+                                    .as_deref()
+                                    .unwrap_or("")
+                                    .parse::<u32>()
+                                    .unwrap_or(0)
+                            })
+                            .map(|size| image_url_from_id(size.url.as_deref().unwrap_or("")))
+                            .filter(|url| !url.is_empty());
+                        from_sizes.or_else(|| {
+                            attributes
+                                .picture
+                                .as_deref()
+                                .and_then(image_url_from_picture)
+                        })
                     });
 
                     playlists.push(LibraryPlaylist {
@@ -675,6 +688,18 @@ fn image_url_from_id(id: &str) -> String {
     }
 }
 
+fn image_url_from_picture(bytes: &[u8]) -> Option<String> {
+    if bytes.len() != 20 {
+        return None;
+    }
+    let id = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let url = image_url_from_id(&id);
+    (!url.is_empty()).then_some(url)
+}
+
 fn session_cache_dir() -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("RSPOTIFY_STATE_DIR") {
         return std::path::PathBuf::from(dir);
@@ -784,5 +809,49 @@ mod tests {
             "playback did not pause: {snapshot:#?}"
         );
         eprintln!("paused at {}ms", snapshot.position_ms);
+    }
+
+    #[test]
+    #[ignore = "requires a logged-in Spotify account and network access"]
+    fn smoke_native_liked_songs_metadata() {
+        let client = NativeSpotify::authenticate().expect("native login");
+        let detail = client
+            .playlist_detail(PlaylistSource::LikedSongs)
+            .expect("liked songs detail");
+        assert!(!detail.tracks.is_empty(), "liked songs returned no tracks");
+
+        let hydrated = detail
+            .tracks
+            .iter()
+            .filter(|track| track.title != "Unknown track" && track.image_url.is_some())
+            .count();
+        eprintln!(
+            "liked songs: {} tracks, {} hydrated, count={:?}",
+            detail.tracks.len(),
+            hydrated,
+            detail.track_count
+        );
+        assert!(
+            detail
+                .tracks
+                .iter()
+                .take(20)
+                .all(|track| track.title != "Unknown track" && track.image_url.is_some()),
+            "first page metadata was not hydrated"
+        );
+        assert!(
+            hydrated * 10 >= detail.tracks.len() * 9,
+            "less than 90% of liked songs were hydrated"
+        );
+
+        let playlists = client.library_playlists().expect("rootlist");
+        eprintln!(
+            "library: {} playlists, {} with artwork",
+            playlists.len(),
+            playlists
+                .iter()
+                .filter(|playlist| playlist.image_url.is_some())
+                .count()
+        );
     }
 }

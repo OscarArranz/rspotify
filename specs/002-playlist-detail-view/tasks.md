@@ -13,6 +13,14 @@
 - [x] Add shuffle, download, more, heart, clock, list, and sort SVG assets.
 - [x] Update `README.md`, `docs/reverse-engineering.md`, and `AGENTS.md` for the new spec.
 - [x] Add unit tests for context metadata mapping, context-page JSON, and description cleanup.
+- [x] Hydrate missing track/episode display metadata using bounded native extended-metadata batches.
+- [x] Read `added_at` directly from collection context metadata.
+- [x] Set playlist-local search input text color explicitly to white.
+- [x] Force the GPUI component theme to dark mode so both search editors use a light foreground
+  regardless of the operating-system appearance.
+- [x] Fall back to raw 20-byte playlist picture IDs when rootlist/playlist cover URLs are absent.
+- [x] Run the read-only real-account metadata check: 5,855/5,855 Liked Songs rows hydrated; 46/108
+  rootlist playlists have artwork sources in the current account payload.
 
 ## Validation
 
@@ -20,6 +28,10 @@
 - [x] `cargo check`
 - [x] `cargo test` (4 passed, 2 ignored)
 - [ ] Visual check against the installed Flatpak client at the default and wide window sizes.
-- [ ] Real-account check (only with explicit network/account approval): open a playlist, open
-  Liked Songs, play a row, pause, shuffle, search, sort, and scroll a multi-page playlist.
+- [x] Read-only real-account check (explicitly approved): inspect context/rootlist structure and
+  verify Liked Songs metadata hydration. No playback was started.
+- [ ] Visual check in the running app: open Liked Songs and confirm titles, album artwork, and
+  dates render; confirm image fallback is improved for playlists with raw picture IDs.
+- [ ] Real-account interaction check (only with explicit network/account approval): open a playlist,
+  play a row, pause, shuffle, search, sort, and scroll a multi-page playlist.
 - [ ] Stop playback and close the app after any real-account check.

@@ -126,7 +126,10 @@ GET https://spclient.wg.spotify.com/playlist/v2/user/<username>/rootlist
 
 It returns a protobuf `spotify.playlist4.proto.SelectedListContent`. Playlist names and
 artwork are in the decorated `contents.meta_items[].attributes` (`name` and
-`picture_size[].url`), parallel to `contents.items[]`. The profile endpoint
+`picture_size[].url`), parallel to `contents.items[]`. Some entries omit `picture_size` but include
+the raw 20-byte `attributes.picture` image ID; hex-encoding that ID produces a working
+`https://i.scdn.co/image/<id>` URL. Some playlists have neither a URL nor an image ID in the
+rootlist metadata or playlist detail record. The profile endpoint
 (`/user-profile-view/v3/profile/<username>`) returns the account name and avatar
 (`image_url`) but not the library.
 
@@ -141,7 +144,14 @@ Web API:
   added-at timestamps.
 - First track page: `GET https://spclient.wg.spotify.com/context-resolve/v1/<context-uri>`
   through `SpClient::get_context`. It returns protobuf-JSON `Context` pages containing
-  `tracks[].uri`, `tracks[].metadata`, and a `next_page_url`.
+  `tracks[].uri`, sparse `tracks[].metadata`, and a `next_page_url`. Runtime inspection of this
+  account's Liked Songs context found 5,855 tracks, each with only `added_at`; the context metadata
+  itself only included `context_owner`.
+- Missing display fields are resolved by POSTing bounded batches to
+  `/extended-metadata/v0/extended-metadata` with `TRACK_V4` / `EPISODE_V4` queries. Runtime
+  validation returned track protobufs with names, artists, album names, cover groups, duration, and
+  explicit flags. A 1,000-entity batch succeeded; a single 5,855-entity request was rejected with
+  HTTP 413, so requests are capped at 500 entities.
 - Additional track pages: `next_page_url` values begin with `hm:/`; librespot strips that
   prefix and requests the remaining path from the SpClient host.
 - Liked Songs context: `spotify:user:<username>:collection`.
@@ -194,11 +204,12 @@ Inferred or delegated to librespot:
   behaviour
 - login5 protobuf exchange, keymaster, audio keys and PlayPlay decryption
 - Connect state machine / dealer protocol
-- playlist `playlist/v2` and context-resolve requests, context metadata keys, and pagination
+- context pagination behavior beyond the first page; first-page context shape and extended metadata
+  hydration are now confirmed at runtime
 
-Not yet verified at runtime in rspotify: playlist header/context loading, Liked Songs
-opening, pagination, and row playback. Those use librespot's native endpoints; real-account
-validation is pending explicit network and account approval.
+Not yet verified in the running UI: pagination and row playback. A read-only real-account check
+confirmed Liked Songs hydration for all 5,855 entries and confirmed the rootlist artwork behavior;
+no playback was started during that check.
 
 Playback is implemented with librespot because it already implements Spotify's native
 login5, keymaster, audio-key and Connect protocols. No DRM is bypassed or reimplemented.
