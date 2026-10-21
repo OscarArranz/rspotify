@@ -37,10 +37,10 @@ applicable. Treat `specs/` as the source of truth for intended behavior.
 ## Architecture map
 
 - `src/lib/spotify/` — native OAuth, librespot session/Connect/player, Pathfinder search, rootlist,
-  profile, and token/device-id storage.
+  playlist/context loading, profile, and token/device-id storage.
 - `src/state/` — global `AppState`, which holds the authenticated `NativeSpotify` handle.
 - `src/router/` — path and stack navigation.
-- `src/view/` — GPUI UI: titlebar, sign-in, search, library sidebar, player bar.
+- `src/view/` — GPUI UI: titlebar, sign-in, search, playlist detail, library sidebar, player bar.
 - `docs/reverse-engineering.md` — observed endpoints, client id, Pathfinder hashes, and evidence.
 - `specs/` — numbered feature specifications and implementation plans.
 
@@ -55,6 +55,10 @@ applicable. Treat `specs/` as the source of truth for intended behavior.
   `streaming` scope.
 - **Library:** use the SpClient rootlist protobuf endpoint (`SelectedListContent`). Names and
   artwork come from the decorated `meta_items`.
+- **Playlist detail:** use `Playlist::get` for header metadata and item timestamps, then
+  `SpClient::get_context` / `get_next_page` for track metadata and pagination. Use
+  `spotify:user:<username>:collection` for Liked Songs. Do not substitute public Web API playlist
+  endpoints.
 - **Playback:** call `Spirc::activate()` before `Spirc::load(...)` so rspotify becomes the active
   Connect device. Playback requires Premium.
 - **Secrets:** never log or commit access tokens, refresh tokens, or the contents of
@@ -69,6 +73,8 @@ applicable. Treat `specs/` as the source of truth for intended behavior.
 - Keep playback state in the shared playback snapshot updated by librespot's player event loop;
   the player bar polls that snapshot instead of blocking on player events.
 - Keep UI state in GPUI entities. Global `AppState` holds only the authenticated client handle.
+- Render playlist detail as one variable-height `ListState` so the header scrolls away while track
+  rows stay virtualized.
 - Use the SVG assets under `assets/icons/` for icons. The bundled Spotify font does not cover all
   media glyphs.
 
@@ -115,3 +121,5 @@ The playback test starts audio. Pause or stop playback and do not leave the app 
 
 - `specs/001-native-spotify-client/` — native login, Pathfinder search, library sidebar, and local
   Spotify Connect playback. Implemented and verified.
+- `specs/002-playlist-detail-view/` — native playlist and Liked Songs detail page with virtualized
+  rows, local search, sort, and pagination. Implemented; real-account and visual validation pending.

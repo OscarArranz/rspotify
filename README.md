@@ -8,7 +8,8 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 - **Native search**: persisted GraphQL queries against Spotify's Pathfinder endpoint (`api-partner.spotify.com/pathfinder/v1/query`), the same service the official desktop and web clients use.
 - **Local playback**: registers as a Spotify Connect device (`rspotify`) and streams through librespot to the default audio output.
 - **Persistent session**: the refresh token and a stable device id are stored in `~/.cache/rspotify/` so the browser login is only needed once.
-- **Spotify-style UI**: custom titlebar, library sidebar, tabbed search results and a now-playing bar, built with GPUI.
+- **Playlist detail**: saved playlists and Liked Songs open in a Spotify-style page with a large header, virtualized track list, local search, sort, and context playback.
+- **Spotify-style UI**: custom titlebar, library sidebar, tabbed search results, playlist pages and a now-playing bar, built with GPUI.
 
 > **Spotify Premium is required for playback.** Free accounts can sign in and search, but Spotify does not permit playback through this kind of client.
 
@@ -21,7 +22,8 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 | Search (all / songs / artists / albums / playlists / podcasts) | Implemented |
 | Local playback (play / pause / next / previous / seek / volume) | Implemented |
 | User library sidebar | Implemented |
-| Playlist detail, albums, queue, lyrics | Not yet |
+| Playlist detail + Liked Songs page | Implemented; visual and real-account checks pending |
+| Albums, queue, lyrics | Not yet |
 
 ## Requirements
 
@@ -77,6 +79,7 @@ src/
 ├── main.rs                     # GPUI app bootstrap
 ├── lib/spotify/
 │   ├── client.rs               # OAuth, librespot session, Connect/player control
+│   ├── playlist.rs             # native playlist detail, context pages, cover colours
 │   ├── search.rs               # Pathfinder persisted-query search
 │   ├── store.rs                # device id + refresh token persistence
 │   └── error.rs                # unified error type
@@ -84,6 +87,7 @@ src/
 ├── state/                      # global AppState (client handle)
 └── view/
     ├── main_layout.rs          # library sidebar + content + player bar
+    ├── screens/playlist.rs     # playlist / Liked Songs detail page
     ├── screens/search.rs       # search tabs and results
     ├── screens/sign_in/        # login screen
     └── components/titlebar/    # Spotify-style titlebar
@@ -93,7 +97,8 @@ Key dependencies:
 
 - **gpui / gpui-component** — UI
 - **librespot 0.8** — native Spotify session, Connect protocol and audio playback
-- **reqwest / serde_json** — Pathfinder search
+- **reqwest / serde_json** — Pathfinder search and context pagination
+- **image** — samples playlist artwork for the header gradient
 
 ## Development workflow
 
@@ -110,18 +115,21 @@ the agent workflow, native-client constraints, validation commands, and security
    AP resolver), and registers a Connect device named `rspotify`.
 4. Search is sent to Pathfinder with query hashes extracted from the installed official
    client. Results are rendered natively.
-5. Pressing play activates the local Connect device and loads the selected track/context.
+5. Opening a playlist requests header metadata from the native `playlist/v2` endpoint and
+   track pages from `context-resolve/v1`; Liked Songs uses the collection context.
+6. Pressing play activates the local Connect device and loads the selected track/context.
    librespot resolves audio keys and streams to the local audio backend.
-6. Playback events update the now-playing bar and progress.
+7. Playback events update the now-playing bar, progress, and active playlist state.
 
 See [`docs/reverse-engineering.md`](docs/reverse-engineering.md) for the observed endpoints,
 client id, Pathfinder query hashes and which parts are confirmed versus inferred.
 
 ## Roadmap
 
-- [ ] Playlist detail view and queue
+- [x] Playlist detail view
+- [ ] Queue
 - [ ] Album/artist pages
-- [x] Liked Songs collection playback
+- [x] Liked Songs detail and playback
 - [ ] Lyrics
 - [ ] Keyboard shortcuts and system media controls
 - [ ] Offline cache controls and audio quality settings

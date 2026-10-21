@@ -8,8 +8,10 @@
 
 mod client;
 mod error;
+mod playlist;
 mod search;
 mod store;
 
 pub use client::{LibraryPlaylist, NativeSpotify, PlaybackSnapshot};
+pub use playlist::{PlaylistDetail, PlaylistPage, PlaylistSource};
 pub use search::{SearchItem, SearchResults};

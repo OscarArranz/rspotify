@@ -130,6 +130,47 @@ artwork are in the decorated `contents.meta_items[].attributes` (`name` and
 (`/user-profile-view/v3/profile/<username>`) returns the account name and avatar
 (`image_url`) but not the library.
 
+## Playlist detail and context pages
+
+The playlist detail page uses the same native services as librespot rather than the public
+Web API:
+
+- Playlist header metadata: `GET https://spclient.wg.spotify.com/playlist/v2/playlist/<id>`
+  through librespot's `Playlist::get`. It returns `playlist4_external.SelectedListContent`
+  with the name, description, cover sizes, owner username, length, item order, and per-item
+  added-at timestamps.
+- First track page: `GET https://spclient.wg.spotify.com/context-resolve/v1/<context-uri>`
+  through `SpClient::get_context`. It returns protobuf-JSON `Context` pages containing
+  `tracks[].uri`, `tracks[].metadata`, and a `next_page_url`.
+- Additional track pages: `next_page_url` values begin with `hm:/`; librespot strips that
+  prefix and requests the remaining path from the SpClient host.
+- Liked Songs context: `spotify:user:<username>:collection`.
+
+The UI reads context metadata defensively (`title`, `artist_name`, `album_name`, `image_url`,
+`duration`, `is_explicit`, and `is_playable`) and falls back to episode fields when present.
+Missing optional fields are omitted instead of guessed.
+
+### Playlist visual metrics
+
+Extracted from `xpui-routes-playlist.js` (module `43396`):
+
+| Constant | Value |
+| --- | --- |
+| `MINIMUM_HEADER_HEIGHT` | `186px` |
+| `MAXIMUM_HEADER_HEIGHT` | `336px` |
+| `BACKGROUND_HEIGHT_PERCENTAGE` | `40vh` |
+| `IMAGE_SIZE` | `192px` |
+| `IMAGE_SIZE_BIG` | `232px` at `min-width: 1280px` |
+
+The official header blends a dominant artwork colour into `#121212` with a radial gradient
+around `14% 12%`. GPUI exposes linear gradients, so rspotify uses a vertical linear
+approximation. Track rows are `56px` high with a `#ffffff1a` hover and a `#1ed760` play
+button.
+
+The official playlist route can render genre/mood filter chips when its payload supplies
+them. The native playlist/context payload used here does not provide a dependable chip list,
+so rspotify deliberately omits chips rather than inventing labels.
+
 ## What is observed vs. inferred
 
 Confirmed directly from the artifact:
@@ -137,6 +178,7 @@ Confirmed directly from the artifact:
 - client id, redirect shape, login5 hosts, pathfinder host and query hashes
 - search variable names and the `searchV2` response tree
 - Connect and audio storage paths
+- playlist header metrics, cover sizes, and row styling in `xpui-routes-playlist.js`
 
 Confirmed at runtime (against a valid account):
 
@@ -152,6 +194,11 @@ Inferred or delegated to librespot:
   behaviour
 - login5 protobuf exchange, keymaster, audio keys and PlayPlay decryption
 - Connect state machine / dealer protocol
+- playlist `playlist/v2` and context-resolve requests, context metadata keys, and pagination
+
+Not yet verified at runtime in rspotify: playlist header/context loading, Liked Songs
+opening, pagination, and row playback. Those use librespot's native endpoints; real-account
+validation is pending explicit network and account approval.
 
 Playback is implemented with librespot because it already implements Spotify's native
 login5, keymaster, audio-key and Connect protocols. No DRM is bypassed or reimplemented.

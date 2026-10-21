@@ -6,10 +6,11 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, div, img, px, relative, rgb, svg,
 };
 
-use crate::lib::spotify::{LibraryPlaylist, NativeSpotify, PlaybackSnapshot};
+use crate::lib::spotify::{LibraryPlaylist, NativeSpotify, PlaybackSnapshot, PlaylistSource};
 use crate::router::{StackRouter, StackRouterHandle};
 use crate::state::AppState;
 use crate::view::components::resizable::{h_resizable, resizable_panel};
+use crate::view::screens::playlist::PlaylistScreen;
 
 const PANEL_MARGIN: f32 = 9.0;
 
@@ -140,7 +141,12 @@ impl Render for LibrarySidebar {
         let liked_client = self.client.clone();
         let entries = self.entries.iter().enumerate().map(|(index, entry)| {
             let client = self.client.clone();
-            let uri = entry.uri.clone();
+            let source = PlaylistSource::Playlist {
+                uri: entry.uri.clone(),
+                name: entry.name.clone(),
+                owner: entry.owner.clone(),
+                image_url: entry.image_url.clone(),
+            };
             div()
                 .id(("library-entry", index))
                 .flex()
@@ -150,10 +156,16 @@ impl Render for LibrarySidebar {
                 .rounded(px(5.0))
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(0x242424)))
-                .on_click(move |_, _, _| {
-                    if let Some(client) = &client {
-                        let _ = client.play_context(&uri);
-                    }
+                .on_click(move |_, _, cx| {
+                    let Some(client) = &client else {
+                        return;
+                    };
+                    let Some(router) = cx.try_global::<StackRouterHandle>().cloned() else {
+                        return;
+                    };
+                    let screen =
+                        cx.new(|cx| PlaylistScreen::new(source.clone(), client.clone(), cx));
+                    router.push(screen.into(), cx);
                 })
                 .child(match &entry.image_url {
                     Some(url) => img(url.clone())
@@ -243,10 +255,17 @@ impl Render for LibrarySidebar {
                     .rounded(px(5.0))
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(0x242424)))
-                    .on_click(move |_, _, _| {
-                        if let Some(client) = &liked_client {
-                            let _ = client.play_context("spotify:collection:tracks");
-                        }
+                    .on_click(move |_, _, cx| {
+                        let Some(client) = &liked_client else {
+                            return;
+                        };
+                        let Some(router) = cx.try_global::<StackRouterHandle>().cloned() else {
+                            return;
+                        };
+                        let screen = cx.new(|cx| {
+                            PlaylistScreen::new(PlaylistSource::LikedSongs, client.clone(), cx)
+                        });
+                        router.push(screen.into(), cx);
                     })
                     .child(
                         div()

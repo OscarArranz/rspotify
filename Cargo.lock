@@ -5843,6 +5843,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui-component",
+ "image",
  "librespot",
  "protobuf",
  "rand 0.9.2",

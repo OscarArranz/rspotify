@@ -20,6 +20,7 @@ use protobuf::Message;
 use serde_json::Value;
 
 use super::error::SpotifyError;
+use super::playlist::{self, PlaylistDetail, PlaylistPage, PlaylistSource};
 use super::search::{self, SearchResults};
 use super::store::SessionStore;
 
@@ -88,6 +89,9 @@ pub struct PlaybackSnapshot {
     pub volume_percent: u8,
     pub shuffle: bool,
     pub repeat: bool,
+    /// The context URI last loaded by rspotify, when playback was started from a playlist,
+    /// album, artist, or collection rather than an ad-hoc list of tracks.
+    pub context_uri: Option<String>,
 }
 
 impl Default for PlaybackSnapshot {
@@ -99,6 +103,7 @@ impl Default for PlaybackSnapshot {
             volume_percent: 50,
             shuffle: false,
             repeat: false,
+            context_uri: None,
         }
     }
 }
@@ -352,6 +357,8 @@ impl NativeSpotify {
                             .picture_size
                             .iter()
                             .find_map(|size| size.url.clone().filter(|url| !url.is_empty()))
+                            .map(|url| image_url_from_id(&url))
+                            .filter(|url| !url.is_empty())
                     });
 
                     playlists.push(LibraryPlaylist {
@@ -371,6 +378,26 @@ impl NativeSpotify {
 
             Ok(playlists)
         })
+    }
+
+    /// Fetches a saved playlist, or the current user's Liked Songs, plus its first context page.
+    pub fn playlist_detail(&self, source: PlaylistSource) -> Result<PlaylistDetail, SpotifyError> {
+        self.inner
+            .runtime
+            .block_on(playlist::fetch_playlist_detail(&self.inner.session, source))
+    }
+
+    /// Fetches one additional context page for an already-loaded playlist.
+    pub fn playlist_next_page(&self, next_page_url: &str) -> Result<PlaylistPage, SpotifyError> {
+        self.inner.runtime.block_on(playlist::fetch_playlist_page(
+            &self.inner.session,
+            next_page_url,
+        ))
+    }
+
+    /// The native context URI for the current user's Liked Songs.
+    pub fn liked_songs_context_uri(&self) -> String {
+        format!("spotify:user:{}:collection", self.inner.username)
     }
 
     /// A consistent snapshot of local playback, with position extrapolated to now.
@@ -407,7 +434,28 @@ impl NativeSpotify {
         self.inner
             .spirc
             .load(LoadRequest::from_context_uri(uri.to_string(), options))
-            .map_err(|error| SpotifyError::Playback(error.to_string()))
+            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
+        self.set_context_uri(Some(uri.to_string()));
+        Ok(())
+    }
+
+    /// Plays a context starting at a specific track.
+    pub fn play_context_at(&self, context_uri: &str, track_uri: &str) -> Result<(), SpotifyError> {
+        let _ = self.inner.spirc.activate();
+        let options = LoadRequestOptions {
+            start_playing: true,
+            playing_track: Some(PlayingTrack::Uri(track_uri.to_string())),
+            ..Default::default()
+        };
+        self.inner
+            .spirc
+            .load(LoadRequest::from_context_uri(
+                context_uri.to_string(),
+                options,
+            ))
+            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
+        self.set_context_uri(Some(context_uri.to_string()));
+        Ok(())
     }
 
     fn play_uris(&self, uris: Vec<String>) -> Result<(), SpotifyError> {
@@ -423,7 +471,14 @@ impl NativeSpotify {
         self.inner
             .spirc
             .load(LoadRequest::from_tracks(uris, options))
-            .map_err(|error| SpotifyError::Playback(error.to_string()))
+            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
+        self.set_context_uri(None);
+        Ok(())
+    }
+
+    fn set_context_uri(&self, context_uri: Option<String>) {
+        let mut playback = self.inner.playback.lock().unwrap();
+        playback.snapshot.context_uri = context_uri;
     }
 
     pub fn play_pause(&self) -> Result<(), SpotifyError> {
@@ -588,7 +643,10 @@ fn image_from_json(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|uri| !uri.is_empty())
     {
-        return Some(image_url_from_id(uri));
+        let url = image_url_from_id(uri);
+        if !url.is_empty() {
+            return Some(url);
+        }
     }
 
     for pointer in [
@@ -608,7 +666,9 @@ fn image_from_json(value: &Value) -> Option<String> {
 
 fn image_url_from_id(id: &str) -> String {
     let id = id.strip_prefix("spotify:image:").unwrap_or(id);
-    if id.starts_with("http://") || id.starts_with("https://") {
+    if id.is_empty() {
+        String::new()
+    } else if id.starts_with("http://") || id.starts_with("https://") {
         id.to_string()
     } else {
         format!("https://i.scdn.co/image/{id}")
