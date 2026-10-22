@@ -105,7 +105,10 @@ impl Render for RootLayout {
             .font_family("Spotify Mix UI Title Var Wide")
             .bg(rgb(0x121212))
             // Titlebar at the top
-            .child(self.titlebar.clone())
+            .child(crate::view::components::render_cache::cached_bar(
+                self.titlebar.clone(),
+                crate::view::components::titlebar::TITLEBAR_HEIGHT,
+            ))
             // Main content area below titlebar
             .child(div().flex_1().overflow_hidden().child(self.router.clone()))
     }

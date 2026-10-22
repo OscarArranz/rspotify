@@ -38,3 +38,5 @@ animation rewound already-clamped movement. Previous completion marks do not est
   `window.refresh()`; the application must be relaunched to verify this runtime fix.
 - User visual feedback: scrolling is now perceptible but still laggy. Reduced the response time
   constant from 45 ms to 18 ms and added a ~100 ms settling regression assertion.
+- Subsequent user feedback clarified that remaining lag is dropped frames across much of the UI,
+  not just the easing response. Spec 008 now owns the broader rendering-performance work.

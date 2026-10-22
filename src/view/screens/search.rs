@@ -86,11 +86,11 @@ impl SearchScreen {
             playlist_scroll: ScrollHandle::new(),
             podcast_scroll: ScrollHandle::new(),
             artist_scroll: ScrollHandle::new(),
-            vertical_scroll_state: SmoothScrollState::default(),
-            featured_scroll_state: SmoothScrollState::default(),
-            playlist_scroll_state: SmoothScrollState::default(),
-            podcast_scroll_state: SmoothScrollState::default(),
-            artist_scroll_state: SmoothScrollState::default(),
+            vertical_scroll_state: SmoothScrollState::new(cx.entity_id()),
+            featured_scroll_state: SmoothScrollState::new(cx.entity_id()),
+            playlist_scroll_state: SmoothScrollState::new(cx.entity_id()),
+            podcast_scroll_state: SmoothScrollState::new(cx.entity_id()),
+            artist_scroll_state: SmoothScrollState::new(cx.entity_id()),
         };
         screen.fetch_results(cx);
         screen

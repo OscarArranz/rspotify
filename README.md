@@ -50,6 +50,10 @@ sudo apt install libasound2-dev
 cargo run --release
 ```
 
+Use the release build when evaluating UI responsiveness; the default `cargo run` uses unoptimized
+application and dependency code. For optional scroll frame-callback timing summaries, run
+`RSPOTIFY_SCROLL_METRICS=1 cargo run --release`. These report aggregate timing only, not account data.
+
 Then press **Log in with Spotify**. A browser window opens at Spotify's login page; after
 authorising, the loopback callback returns to the app automatically.
 

@@ -11,6 +11,7 @@ use gpui::{
 use crate::lib::spotify::{LibraryPlaylist, NativeSpotify, PlaybackSnapshot, PlaylistSource};
 use crate::router::{StackRouter, StackRouterHandle};
 use crate::state::AppState;
+use crate::view::components::render_cache::{cached_bar, cached_fill};
 use crate::view::components::resizable::{h_resizable, resizable_panel};
 use crate::view::components::smooth_scroll::{ScrollAxis, SmoothScrollElement, SmoothScrollState};
 use crate::view::screens::playlist::{PlaylistScreen, render_cover};
@@ -138,12 +139,12 @@ impl Render for MainLayout {
                         .child(
                             resizable_panel()
                                 .size(px(340.0))
-                                .child(self.library.clone()),
+                                .child(cached_fill(self.library.clone())),
                         )
-                        .child(resizable_panel().child(self.stack_router.clone())),
+                        .child(resizable_panel().child(cached_fill(self.stack_router.clone()))),
                 ),
             )
-            .children(self.player.clone())
+            .children(self.player.clone().map(|player| cached_bar(player, 76.0)))
     }
 }
 
@@ -160,7 +161,7 @@ impl LibrarySidebar {
             entries: Vec::new(),
             client: client.clone(),
             scroll_handle: ScrollHandle::new(),
-            scroll_state: SmoothScrollState::default(),
+            scroll_state: SmoothScrollState::new(cx.entity_id()),
         };
         if let Some(client) = client {
             cx.spawn(async move |this, cx| {

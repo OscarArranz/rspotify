@@ -110,7 +110,7 @@ impl PlaylistScreen {
             next_page_loading: false,
             next_page_error: None,
             action_error: None,
-            scroll_animation: SmoothScrollState::default(),
+            scroll_animation: SmoothScrollState::new(cx.entity_id()),
         };
         if matches!(this.source, PlaylistSource::LikedSongs) {
             if let Some(detail) = this.client.loaded_liked_songs_detail() {

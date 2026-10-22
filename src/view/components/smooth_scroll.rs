@@ -1,13 +1,13 @@
 //! Own scroll input rather than trying to undo GPUI's already-applied wheel movement.
-use std::{cell::RefCell, rc::Rc, time::Instant};
+use std::{cell::RefCell, rc::Rc, sync::OnceLock, time::Instant};
 
 const SCROLL_RESPONSE_SECONDS: f32 = 0.018;
 const SCROLL_SETTLE_EPSILON_PX: f32 = 0.35;
 
 use gpui::{
-    App, DispatchPhase, Div, HitboxBehavior, InteractiveElement, IntoElement, ListState, Pixels,
-    ScrollHandle, ScrollWheelEvent, Stateful, StatefulInteractiveElement, Styled, Window, canvas,
-    point, px,
+    App, DispatchPhase, Div, EntityId, HitboxBehavior, InteractiveElement, IntoElement, ListState,
+    Pixels, ScrollHandle, ScrollWheelEvent, Stateful, StatefulInteractiveElement, Styled, Window,
+    canvas, point, px,
 };
 
 #[derive(Clone, Copy)]
@@ -23,6 +23,7 @@ struct Motion {
     running: bool,
     last_frame: Option<Instant>,
     generation: u64,
+    frame_intervals_ms: Option<Vec<f32>>,
 }
 
 impl Motion {
@@ -62,10 +63,30 @@ impl Motion {
     }
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct SmoothScrollState(Rc<RefCell<Motion>>);
+#[derive(Clone)]
+pub(crate) struct SmoothScrollState(Rc<RefCell<Motion>>, Option<EntityId>);
+
+#[cfg(test)]
+impl Default for SmoothScrollState {
+    fn default() -> Self {
+        Self(Rc::default(), None)
+    }
+}
 
 impl SmoothScrollState {
+    pub(crate) fn new(owner: EntityId) -> Self {
+        Self(Rc::default(), Some(owner))
+    }
+
+    fn invalidate(&self, window: &mut Window, cx: &mut App) {
+        if let Some(owner) = self.1 {
+            cx.notify(owner);
+        } else {
+            // Anonymous states are used by the low-level headless dispatch tests only.
+            window.refresh();
+        }
+    }
+
     pub(crate) fn cancel(&self) {
         let mut motion = self.0.borrow_mut();
         motion.running = false;
@@ -147,6 +168,10 @@ fn handle_wheel(
     motion.generation = motion.generation.wrapping_add(1);
     let generation = motion.generation;
     motion.last_frame = Some(Instant::now());
+    static METRICS_ENABLED: OnceLock<bool> = OnceLock::new();
+    motion.frame_intervals_ms = (*METRICS_ENABLED
+        .get_or_init(|| std::env::var("RSPOTIFY_SCROLL_METRICS").is_ok_and(|value| value == "1")))
+    .then(Vec::new);
     drop(motion);
     schedule_frame(
         window,
@@ -155,7 +180,7 @@ fn handle_wheel(
         on_scroll.clone(),
         generation,
     );
-    window.refresh();
+    state.invalidate(window, cx);
 }
 
 fn schedule_frame(
@@ -176,19 +201,38 @@ fn schedule_frame(
             .duration_since(motion.last_frame.unwrap_or(now))
             .as_secs_f32();
         motion.last_frame = Some(now);
+        if let Some(intervals) = &mut motion.frame_intervals_ms {
+            intervals.push(elapsed * 1000.0);
+        }
         let next = motion.advance(current, max, elapsed);
         let running = motion.running;
+        let finished_intervals = if !running {
+            motion.frame_intervals_ms.take()
+        } else {
+            None
+        };
         drop(motion);
         if let Some(next) = next {
             surface.set_position(next);
             on_scroll(window, cx);
-            window.refresh();
+            state.invalidate(window, cx);
         }
         if running {
             schedule_frame(window, surface, state, on_scroll, generation);
-            // request_animation_frame() queries the current view and is invalid from a
-            // post-frame callback. refresh() schedules the next rendered frame directly.
-            window.refresh();
+            // Updating the owner above schedules the next frame without discarding all
+            // sibling caches. No render-only Window::current_view lookup is needed here.
+        }
+        if let Some(mut intervals) = finished_intervals.filter(|samples| samples.len() >= 3) {
+            // Opt-in aggregate frame-callback spacing, not a CPU/GPU profiler or an FPS claim.
+            // Never include URIs, playlist names, search terms, or account information.
+            intervals.sort_by(f32::total_cmp);
+            let count = intervals.len();
+            let mean = intervals.iter().sum::<f32>() / count as f32;
+            let p95 = intervals[(count * 95).div_ceil(100).saturating_sub(1)];
+            eprintln!(
+                "scroll frames: samples={count} mean_ms={mean:.2} p95_ms={p95:.2} max_ms={:.2}",
+                intervals[count - 1]
+            );
         }
     });
 }
