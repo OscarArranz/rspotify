@@ -1,6 +1,9 @@
 //! Own scroll input rather than trying to undo GPUI's already-applied wheel movement.
 use std::{cell::RefCell, rc::Rc, time::Instant};
 
+const SCROLL_RESPONSE_SECONDS: f32 = 0.018;
+const SCROLL_SETTLE_EPSILON_PX: f32 = 0.35;
+
 use gpui::{
     App, DispatchPhase, Div, HitboxBehavior, InteractiveElement, IntoElement, ListState, Pixels,
     ScrollHandle, ScrollWheelEvent, Stateful, StatefulInteractiveElement, Styled, Window, canvas,
@@ -48,11 +51,11 @@ impl Motion {
         }
         self.target = self.target.clamp(-max.max(0.0), 0.0);
         let remaining = self.target - current;
-        let next = if remaining.abs() < 0.1 {
+        let next = if remaining.abs() < SCROLL_SETTLE_EPSILON_PX {
             self.running = false;
             self.target
         } else {
-            current + remaining * (1.0 - (-seconds / 0.045).exp())
+            current + remaining * (1.0 - (-seconds / SCROLL_RESPONSE_SECONDS).exp())
         };
         self.last_position = next;
         Some(next)
@@ -183,7 +186,9 @@ fn schedule_frame(
         }
         if running {
             schedule_frame(window, surface, state, on_scroll, generation);
-            window.request_animation_frame();
+            // request_animation_frame() queries the current view and is invalid from a
+            // post-frame callback. refresh() schedules the next rendered frame directly.
+            window.refresh();
         }
     });
 }
@@ -522,5 +527,17 @@ mod tests {
         }
         assert!((run(0.016, 6) - run(0.008, 12)).abs() < 0.001);
         assert_eq!(run(0.016, 40), -60.0);
+
+        let mut m = Motion::default();
+        m.enqueue(0.0, -60.0, 500.0);
+        m.running = true;
+        let mut position = 0.0;
+        for _ in 0..6 {
+            position = m.advance(position, 500.0, 0.016).unwrap();
+        }
+        assert!(
+            (position + 60.0).abs() < 1.0,
+            "should settle near the target in ~100ms"
+        );
     }
 }

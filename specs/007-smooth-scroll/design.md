@@ -17,7 +17,8 @@ helper owns the scroll offset and eases both pixel and line deltas: Linux wheel 
 pixel-based too. Scrollable divs use clipped overflow plus a tracked handle, disabling GPUI's
 immediate wheel movement; the helper consumes input only when the requested axis can move.
 Repeated input accumulates toward a clamped target; reversing direction discards stale momentum.
-Frames follow a time-based exponential curve and stop once settled. It must not block GPUI's
+Frames follow a responsive 18 ms time-based exponential curve and stop once within sub-pixel
+tolerance of the destination, so ordinary wheel steps settle in roughly 100 ms. It must not block GPUI's
 foreground thread. Horizontal/vertical direction and
 existing parent/child scroll ownership are preserved; the helper must not consume gestures that the
 child cannot handle.

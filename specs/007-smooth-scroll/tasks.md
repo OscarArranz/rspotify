@@ -33,3 +33,8 @@ animation rewound already-clamped movement. Previous completion marks do not est
   frame cadence are NOT visually verified. No desktop automation or account access was performed.
 - The built app is `target/debug/rspotify_client` in `worktree-smooth-scroll`. Existing desktop
   launchers or binaries from other worktrees do not include this branch's changes.
+- First manual `cargo run` after this correction attempt exposed a GPUI frame-scheduling panic.
+  Replaced the invalid `request_animation_frame()` call from a post-frame callback with
+  `window.refresh()`; the application must be relaunched to verify this runtime fix.
+- User visual feedback: scrolling is now perceptible but still laggy. Reduced the response time
+  constant from 45 ms to 18 ms and added a ~100 ms settling regression assertion.
