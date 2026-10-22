@@ -317,6 +317,7 @@ struct PlayerBar {
     dragging: Option<SliderDrag>,
     optimistic_seek: Option<OptimisticSeek>,
     optimistic_volume: Option<OptimisticVolume>,
+    last_nonzero_volume: u8,
 }
 
 struct OptimisticSeek {
@@ -359,6 +360,11 @@ enum SliderDrag {
 impl PlayerBar {
     fn new(client: NativeSpotify, cx: &mut Context<Self>) -> Self {
         let playback = client.playback();
+        let last_nonzero_volume = if playback.volume_percent > 0 {
+            playback.volume_percent
+        } else {
+            50
+        };
         let poll_client = client.clone();
         cx.spawn(async move |this, cx| {
             loop {
@@ -368,6 +374,9 @@ impl PlayerBar {
                 let snapshot = poll_client.playback();
                 let updated = this.update(cx, |this, cx| {
                     if this.playback != snapshot {
+                        if snapshot.volume_percent > 0 {
+                            this.last_nonzero_volume = snapshot.volume_percent;
+                        }
                         this.playback = snapshot;
                         cx.notify();
                     }
@@ -387,6 +396,7 @@ impl PlayerBar {
             dragging: None,
             optimistic_seek: None,
             optimistic_volume: None,
+            last_nonzero_volume,
         }
     }
 }
@@ -450,7 +460,7 @@ impl Render for PlayerBar {
         let prev_client = client.clone();
         let play_client = client.clone();
         let next_client = client.clone();
-        let volume_client = client.clone();
+        let volume_button_client = client.clone();
         let weak = cx.entity().downgrade();
         let down_weak = weak.clone();
         let move_weak = weak.clone();
@@ -543,6 +553,9 @@ impl Render for PlayerBar {
                                 let percent = (slider_fraction(bounds, event.position.x) * 100.0)
                                     .round() as u8;
                                 let _ = this.client.set_volume_percent(percent);
+                                if percent > 0 {
+                                    this.last_nonzero_volume = percent;
+                                }
                                 this.optimistic_volume = Some(OptimisticVolume {
                                     target_percent: percent,
                                     started_at: Instant::now(),
@@ -728,17 +741,30 @@ impl Render for PlayerBar {
                     .w(px(220.0))
                     .flex_shrink_0()
                     .justify_end()
-                    .child(
+                    .child({
+                        let muted = displayed_volume == 0;
+                        let icon_path = if muted {
+                            "icons/volume-muted.svg"
+                        } else {
+                            "icons/volume-high.svg"
+                        };
+                        let restore_volume = self.last_nonzero_volume;
                         div()
-                            .id("volume-down")
+                            .id("volume-mute-toggle")
                             .cursor_pointer()
-                            .px(px(6.0))
-                            .text_color(rgb(0xb3b3b3))
+                            .p(px(4.0))
                             .on_click(move |_, _, _| {
-                                let _ = volume_client.set_volume_percent(volume.saturating_sub(5));
+                                let target = if muted { restore_volume } else { 0 };
+                                let _ = volume_button_client.set_volume_percent(target);
                             })
-                            .child("−"),
-                    )
+                            .child(
+                                svg()
+                                    .path(icon_path)
+                                    .size(px(20.0))
+                                    .text_color(rgb(0xb3b3b3))
+                                    .hover(|style| style.text_color(gpui::white())),
+                            )
+                    })
                     .child(
                         player_slider(
                             "volume-slider",
@@ -774,27 +800,6 @@ impl Render for PlayerBar {
                             },
                         )
                         .w(px(120.0)),
-                    )
-                    .child(
-                        div()
-                            .id("volume-up")
-                            .cursor_pointer()
-                            .px(px(6.0))
-                            .text_color(rgb(0xb3b3b3))
-                            .on_click({
-                                let client = client.clone();
-                                move |_, _, _| {
-                                    let _ = client.set_volume_percent(volume.saturating_add(5));
-                                }
-                            })
-                            .child("+"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0xb3b3b3))
-                            .w(px(32.0))
-                            .child(format!("{displayed_volume}%")),
                     ),
             )
     }
