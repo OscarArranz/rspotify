@@ -1,4 +1,4 @@
-//! Small on-disk store for the persistent device id, OAuth refresh token, and playback volume.
+//! Small on-disk store for session credentials, playback volume, and cached profile details.
 //!
 //! The file lives under the user's cache directory and is written with owner-only
 //! permissions on Unix. It never contains the account password.
@@ -19,12 +19,21 @@ pub struct StoredSession {
     /// Last selected Connect volume; absent in state files written by older versions.
     #[serde(default)]
     pub volume_percent: Option<u8>,
+    /// Last known non-secret profile details used to render the app before session refresh.
+    #[serde(default)]
+    pub profile: Option<StoredProfile>,
 }
 
 impl StoredSession {
     fn volume_percent(&self) -> u8 {
         self.volume_percent.unwrap_or(50).min(100)
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredProfile {
+    pub name: String,
+    pub image_url: Option<String>,
 }
 
 pub struct SessionStore {
@@ -58,6 +67,14 @@ impl SessionStore {
         }
     }
 
+    pub fn profile(&self) -> Option<&StoredProfile> {
+        self.data.profile.as_ref()
+    }
+
+    pub fn has_restorable_session(&self) -> bool {
+        self.refresh_token().is_some()
+    }
+
     pub fn ensure_device_id(&mut self) -> String {
         if self.data.device_id.is_empty() {
             self.data.device_id = format!("{:032x}", rand::random::<u128>());
@@ -72,6 +89,21 @@ impl SessionStore {
         self.data.refresh_token = Some(token.to_string());
         if let Err(error) = self.save() {
             eprintln!("failed to persist Spotify refresh token: {error}");
+        }
+    }
+
+    pub fn clear_refresh_token(&mut self) {
+        self.data.refresh_token = None;
+        self.data.profile = None;
+        if let Err(error) = self.save() {
+            eprintln!("failed to clear Spotify refresh token: {error}");
+        }
+    }
+
+    pub fn set_profile(&mut self, profile: StoredProfile) {
+        self.data.profile = Some(profile);
+        if let Err(error) = self.save() {
+            eprintln!("failed to persist Spotify profile: {error}");
         }
     }
 
@@ -105,6 +137,55 @@ fn state_file_path() -> PathBuf {
     cache.join("rspotify").join("session.json")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_profile_round_trips_and_legacy_session_remains_readable() {
+        let session = StoredSession {
+            device_id: "device-id".into(),
+            refresh_token: Some("refresh-token".into()),
+            ..Default::default()
+        };
+        let session = StoredSession {
+            profile: Some(StoredProfile {
+                name: "Listener".into(),
+                image_url: Some("https://images.example/avatar".into()),
+            }),
+            ..session
+        };
+        let encoded = serde_json::to_string(&session).unwrap();
+        let decoded: StoredSession = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.profile, session.profile);
+
+        let legacy: StoredSession =
+            serde_json::from_str(r#"{"device_id":"old-device","refresh_token":"old-token"}"#)
+                .unwrap();
+        assert!(legacy.profile.is_none());
+    }
+
+    #[test]
+    fn old_state_without_volume_deserializes_and_volume_is_clamped() {
+        let state: StoredSession =
+            serde_json::from_str(r#"{"device_id":"abc","refresh_token":null}"#)
+                .expect("legacy state should deserialize");
+        assert_eq!(state.volume_percent, None);
+        assert_eq!(state.volume_percent(), 50);
+
+        let too_high = StoredSession {
+            volume_percent: Some(255),
+            ..Default::default()
+        };
+        assert_eq!(too_high.volume_percent(), 100);
+        let saved = StoredSession {
+            volume_percent: Some(27),
+            ..Default::default()
+        };
+        assert_eq!(saved.volume_percent(), 27);
+    }
+}
+
 #[cfg(unix)]
 fn restrict_dir(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -122,34 +203,3 @@ fn restrict_file(path: &Path) {
 
 #[cfg(not(unix))]
 fn restrict_file(_path: &Path) {}
-
-#[cfg(test)]
-mod tests {
-    use super::StoredSession;
-
-    #[test]
-    fn old_state_without_volume_deserializes() {
-        let state: StoredSession =
-            serde_json::from_str(r#"{"device_id":"abc","refresh_token":null}"#)
-                .expect("legacy state should deserialize");
-        assert_eq!(state.volume_percent, None);
-        assert_eq!(state.volume_percent(), 50);
-    }
-
-    #[test]
-    fn volume_preference_defaults_and_clamps() {
-        let old_state = StoredSession::default();
-        assert_eq!(old_state.volume_percent(), 50);
-
-        let too_high = StoredSession {
-            volume_percent: Some(255),
-            ..Default::default()
-        };
-        assert_eq!(too_high.volume_percent(), 100);
-        let saved = StoredSession {
-            volume_percent: Some(27),
-            ..Default::default()
-        };
-        assert_eq!(saved.volume_percent(), 27);
-    }
-}

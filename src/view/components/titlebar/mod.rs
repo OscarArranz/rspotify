@@ -77,7 +77,14 @@ impl Titlebar {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Re-render when login/logout changes the global auth state so the
         // authenticated controls (search, avatar, navigation) appear immediately.
-        let auth_subscription = cx.observe_global::<AppState>(|_, cx| cx.notify());
+        let auth_subscription = cx.observe_global::<AppState>(|this, cx| {
+            let profile = cx.try_global::<AppState>().and_then(AppState::profile);
+            this.user_avatar.update(cx, |avatar, cx| {
+                avatar.set_profile(profile);
+                cx.notify();
+            });
+            cx.notify();
+        });
         // The stack router is created with the main layout after login. Observe
         // the global so we can subscribe to the router once it exists.
         let stack_global_subscription = cx.observe_global::<StackRouterHandle>(|this, cx| {
@@ -85,8 +92,9 @@ impl Titlebar {
             cx.notify();
         });
 
+        let cached_profile = cx.try_global::<AppState>().and_then(AppState::profile);
         let mut titlebar = Self {
-            user_avatar: cx.new(|_| UserAvatar::new()),
+            user_avatar: cx.new(|_| UserAvatar::new(cached_profile)),
             search_bar: cx.new(|cx| SearchBar::new(window, cx)),
             _auth_subscription: auth_subscription,
             _stack_global_subscription: stack_global_subscription,

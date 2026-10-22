@@ -46,8 +46,9 @@ applicable. Treat `specs/` as the source of truth for intended behavior.
 
 ## Native client constraints
 
-- **Login:** use Spotify's desktop OAuth client id and loopback redirect. Persist only the refresh
-  token and a stable device id; never persist the account password.
+- **Login:** use Spotify's desktop OAuth client id and loopback redirect. Persist the refresh token,
+  stable device id, and cached non-secret display name/avatar URL for optimistic startup UI; never
+  persist the account password or access token.
 - **Session:** use librespot's login5 session. Do not call the public Web API for search, library,
   or playback.
 - **Search:** use the Pathfinder `searchDesktop` persisted query. Get the bearer token from

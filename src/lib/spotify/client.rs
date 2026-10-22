@@ -8,7 +8,7 @@ use librespot::connect::{ConnectConfig, LoadRequest, LoadRequestOptions, Playing
 use librespot::core::{
     Session, SessionConfig, authentication::Credentials, cache::Cache, config::DeviceType,
 };
-use librespot::oauth::OAuthClientBuilder;
+use librespot::oauth::{OAuthClientBuilder, OAuthError};
 use librespot::playback::{
     audio_backend,
     config::{AudioFormat, PlayerConfig},
@@ -22,7 +22,7 @@ use serde_json::Value;
 use super::error::SpotifyError;
 use super::playlist::{self, PlaylistDetail, PlaylistPage, PlaylistSource};
 use super::search::{self, SearchResults};
-use super::store::SessionStore;
+use super::store::{SessionStore, StoredProfile};
 
 /// Spotify's own desktop client id. The same id is used by librespot for keymaster
 /// requests and is allowed to use the loopback OAuth redirect below.
@@ -144,6 +144,21 @@ pub struct NativeSpotify {
 }
 
 impl NativeSpotify {
+    pub fn cached_profile() -> Option<UserProfile> {
+        SessionStore::load().profile().map(|profile| UserProfile {
+            name: profile.name.clone(),
+            image_url: profile.image_url.clone(),
+        })
+    }
+
+    pub fn has_restorable_session() -> bool {
+        SessionStore::load().has_restorable_session()
+    }
+
+    pub fn clear_saved_refresh_token() {
+        SessionStore::load().clear_refresh_token();
+    }
+
     /// Performs the interactive desktop OAuth flow and connects a librespot session.
     ///
     /// This is blocking and must run on a background thread. It opens the user's
@@ -152,23 +167,14 @@ impl NativeSpotify {
     pub fn authenticate() -> Result<Self, SpotifyError> {
         let mut store = SessionStore::load();
         let device_id = store.ensure_device_id();
-
-        let client_id =
-            std::env::var("RSPOTIFY_NATIVE_CLIENT_ID").unwrap_or_else(|_| NATIVE_CLIENT_ID.into());
-        let redirect_uri =
-            std::env::var("RSPOTIFY_REDIRECT_URI").unwrap_or_else(|_| NATIVE_REDIRECT_URI.into());
-
-        let oauth = OAuthClientBuilder::new(&client_id, &redirect_uri, OAUTH_SCOPES.to_vec())
-            .open_in_browser()
-            .with_custom_message(OAUTH_SUCCESS_HTML)
-            .build()?;
+        let (client_id, oauth) = oauth_client(true)?;
 
         // Reuse a stored refresh token when possible, otherwise show the browser flow.
         let mut token = match store.refresh_token() {
             Some(refresh) => match oauth.refresh_token(refresh) {
                 Ok(token) => token,
-                Err(error) => {
-                    eprintln!("stored Spotify session expired ({error}); signing in again");
+                Err(_) => {
+                    eprintln!("stored Spotify session was rejected; starting interactive sign-in");
                     oauth.get_access_token()?
                 }
             },
@@ -186,6 +192,42 @@ impl NativeSpotify {
 
         let initial_volume = store.volume_percent();
         Self::connect(token.access_token, device_id, client_id, initial_volume)
+    }
+
+    /// Restores a saved session without opening a browser. Must run off the GPUI thread.
+    pub fn restore() -> Result<Self, SpotifyError> {
+        let mut store = SessionStore::load();
+        let refresh = store
+            .refresh_token()
+            .ok_or_else(|| SpotifyError::Auth("no saved refresh token".into()))?
+            .to_owned();
+        let device_id = store.ensure_device_id();
+        let (client_id, oauth) = oauth_client(false)?;
+        let token = oauth.refresh_token(&refresh).map_err(|error| {
+            if is_rejected_refresh(&error) {
+                SpotifyError::InvalidRefreshToken
+            } else {
+                SpotifyError::OAuth(error.to_string())
+            }
+        })?;
+        let refresh_token = if token.refresh_token.is_empty() {
+            refresh
+        } else {
+            token.refresh_token
+        };
+        store.set_refresh_token(&refresh_token);
+        let initial_volume = store.volume_percent();
+        Self::connect(token.access_token, device_id, client_id, initial_volume)
+    }
+
+    /// Fetch and persist the current profile. Profile fetch failure is non-fatal.
+    pub fn persist_profile(&self) -> Option<UserProfile> {
+        let profile = self.user_profile().ok()?;
+        SessionStore::load().set_profile(StoredProfile {
+            name: profile.name.clone(),
+            image_url: profile.image_url.clone(),
+        });
+        Some(profile)
     }
 
     fn connect(
@@ -930,6 +972,32 @@ fn session_cache_dir() -> std::path::PathBuf {
         .or_else(|_| std::env::var("HOME").map(|home| std::path::Path::new(&home).join(".cache")))
         .unwrap_or_else(|_| std::env::temp_dir());
     cache.join("rspotify")
+}
+
+fn oauth_client(
+    interactive: bool,
+) -> Result<(String, librespot::oauth::OAuthClient), SpotifyError> {
+    let client_id =
+        std::env::var("RSPOTIFY_NATIVE_CLIENT_ID").unwrap_or_else(|_| NATIVE_CLIENT_ID.into());
+    let redirect_uri =
+        std::env::var("RSPOTIFY_REDIRECT_URI").unwrap_or_else(|_| NATIVE_REDIRECT_URI.into());
+    let mut builder = OAuthClientBuilder::new(&client_id, &redirect_uri, OAUTH_SCOPES.to_vec());
+    if interactive {
+        builder = builder
+            .open_in_browser()
+            .with_custom_message(OAUTH_SUCCESS_HTML);
+    }
+    Ok((client_id, builder.build()?))
+}
+
+fn is_rejected_refresh(error: &OAuthError) -> bool {
+    match error {
+        OAuthError::ExchangeCode { e } => {
+            let normalized = e.to_ascii_lowercase();
+            normalized.contains("invalid_grant") || normalized.contains("invalid_token")
+        }
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
