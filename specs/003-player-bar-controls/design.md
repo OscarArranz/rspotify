@@ -34,3 +34,14 @@ tooltip. On hover, the actual fill remains fixed and a lighter segment previews 
 During drag, the thumb previews the clamped pointer position; seek is committed on mouse-up, while
 volume is applied continuously. The player-bar mouse handlers continue tracking drag movement while
 the pointer is outside the narrow slider but still within the bar.
+
+### Playback clock ownership
+
+`PlaybackInner` owns the position and its monotonic timestamp as one clock anchor. Only updates
+that supply a position may reset that timestamp; metadata and Connect context updates must not.
+Local loading/playing/paused events claim transport ownership until stopped or unavailable. While
+claimed, Connect polling must not overwrite local metadata, position, or playing state, including
+when a stale server snapshot still names Spotify's previous device. Recheck ownership after async
+metadata hydration. Stopped playback releases ownership so a later remote selection can be shown.
+Keep legitimate local seeks and corrections (including backward seeks) authoritative; do not hide
+the bug by forcing monotonic positions. Test event/poll interleavings headlessly with explicit times.

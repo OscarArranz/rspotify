@@ -125,7 +125,10 @@ position, volume, shuffle, and repeat. A dedicated runtime task consumes `Player
 - position events update the last known position,
 - volume/shuffle/repeat events update their fields.
 
-Each event records `updated_at`. `NativeSpotify::playback` clones the snapshot and extrapolates the
+Position-bearing events record `updated_at`; metadata-only updates leave the clock intact.
+Local loading/playing/paused events own transport state until stopped or unavailable, preventing
+stale Connect polling from overwriting the local clock (see spec 003's clock-ownership design).
+`NativeSpotify::playback` clones the snapshot and extrapolates the
 position by the elapsed time while playing, clamped to the track duration. This keeps the progress
 bar smooth without querying Spotify.
 

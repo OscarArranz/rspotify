@@ -125,6 +125,59 @@ pub struct LibraryPlaylist {
 struct PlaybackInner {
     snapshot: PlaybackSnapshot,
     updated_at: Instant,
+    local_player_active: bool,
+}
+
+impl PlaybackInner {
+    fn snapshot_at(&self, now: Instant) -> PlaybackSnapshot {
+        let mut snapshot = self.snapshot.clone();
+        if snapshot.is_playing {
+            let elapsed = now.duration_since(self.updated_at).as_millis() as u64;
+            snapshot.position_ms = snapshot.position_ms.saturating_add(elapsed);
+            if let Some(track) = &snapshot.now_playing {
+                if track.duration_ms > 0 {
+                    snapshot.position_ms = snapshot.position_ms.min(track.duration_ms);
+                }
+            }
+        }
+        snapshot
+    }
+
+    fn apply_connect_state(
+        &mut self,
+        remote: &librespot::connect::RemotePlayerState,
+        local_device_id: &str,
+        now: Instant,
+    ) {
+        if self.local_player_active {
+            return;
+        }
+        if remote.track_uri.is_empty() {
+            if remote.active_device_id != local_device_id {
+                self.snapshot.now_playing = None;
+                self.snapshot.is_playing = false;
+                self.snapshot.position_ms = 0;
+                self.snapshot.context_uri = None;
+                self.updated_at = now;
+            }
+            return;
+        }
+        if self
+            .snapshot
+            .now_playing
+            .as_ref()
+            .is_some_and(|track| track.uri == remote.track_uri)
+        {
+            if remote.active_device_id != local_device_id {
+                self.snapshot.is_playing = false;
+                self.snapshot.position_ms = remote.position_ms;
+                self.updated_at = now;
+            }
+            if !remote.context_uri.is_empty() {
+                self.snapshot.context_uri = Some(remote.context_uri.clone());
+            }
+        }
+    }
 }
 
 struct NativeInner {
@@ -310,6 +363,7 @@ impl NativeSpotify {
                 ..PlaybackSnapshot::default()
             },
             updated_at: Instant::now(),
+            local_player_active: false,
         }));
         spawn_player_event_loop(&runtime, &player, playback.clone());
         spawn_connect_state_event_loop(&runtime, &spirc, &session, playback.clone());
@@ -491,20 +545,7 @@ impl NativeSpotify {
     /// A consistent snapshot of local playback, with position extrapolated to now.
     pub fn playback(&self) -> PlaybackSnapshot {
         let inner = self.inner.playback.lock().unwrap();
-        let mut snapshot = inner.snapshot.clone();
-        if snapshot.is_playing {
-            let elapsed = inner.updated_at.elapsed().as_millis() as u64;
-            let duration = snapshot
-                .now_playing
-                .as_ref()
-                .map(|track| track.duration_ms)
-                .unwrap_or(0);
-            snapshot.position_ms = snapshot.position_ms.saturating_add(elapsed);
-            if duration > 0 {
-                snapshot.position_ms = snapshot.position_ms.min(duration);
-            }
-        }
-        snapshot
+        inner.snapshot_at(Instant::now())
     }
 
     /// Plays a single track URI, making this client the active Connect device.
@@ -689,81 +730,88 @@ fn spawn_player_event_loop(
     runtime.spawn(async move {
         while let Some(event) = events.recv().await {
             let mut inner = playback.lock().unwrap();
-            match event {
-                PlayerEvent::TrackChanged { audio_item } => {
-                    let (artists, album) = match &audio_item.unique_fields {
-                        librespot::metadata::audio::UniqueFields::Track {
-                            artists, album, ..
-                        } => (
-                            artists
-                                .iter()
-                                .map(|artist| artist.name.clone())
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                            album.clone(),
-                        ),
-                        librespot::metadata::audio::UniqueFields::Episode { show_name, .. } => {
-                            (show_name.clone(), "Episode".to_string())
-                        }
-                        librespot::metadata::audio::UniqueFields::Local {
-                            artists, album, ..
-                        } => (
-                            artists.clone().unwrap_or_default(),
-                            album.clone().unwrap_or_default(),
-                        ),
-                    };
-                    inner.snapshot.now_playing = Some(NowPlaying {
-                        uri: audio_item.uri.clone(),
-                        title: audio_item.name.clone(),
-                        artists,
-                        album,
-                        cover_url: audio_item.covers.first().map(|cover| cover.url.clone()),
-                        duration_ms: audio_item.duration_ms as u64,
-                    });
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Playing { position_ms, .. } => {
-                    inner.snapshot.is_playing = true;
-                    inner.snapshot.position_ms = position_ms as u64;
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Paused { position_ms, .. } => {
-                    inner.snapshot.is_playing = false;
-                    inner.snapshot.position_ms = position_ms as u64;
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Seeked { position_ms, .. }
-                | PlayerEvent::PositionCorrection { position_ms, .. }
-                | PlayerEvent::PositionChanged { position_ms, .. } => {
-                    inner.snapshot.position_ms = position_ms as u64;
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Loading { position_ms, .. } => {
-                    inner.snapshot.position_ms = position_ms as u64;
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Stopped { .. } => {
-                    inner.snapshot.is_playing = false;
-                    inner.snapshot.position_ms = 0;
-                    inner.snapshot.now_playing = None;
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Unavailable { .. } => {
-                    inner.snapshot.is_playing = false;
-                }
-                PlayerEvent::VolumeChanged { volume } => {
-                    inner.snapshot.volume_percent = ((volume as u32 * 100) / u16::MAX as u32) as u8;
-                }
-                PlayerEvent::ShuffleChanged { shuffle } => {
-                    inner.snapshot.shuffle = shuffle;
-                }
-                PlayerEvent::RepeatChanged { context, .. } => {
-                    inner.snapshot.repeat = context;
-                }
-                _ => {}
-            }
+            apply_player_event(&mut inner, event, Instant::now());
         }
     });
+}
+
+fn apply_player_event(inner: &mut PlaybackInner, event: PlayerEvent, now: Instant) {
+    match event {
+        PlayerEvent::TrackChanged { audio_item } => {
+            let (artists, album) = match &audio_item.unique_fields {
+                librespot::metadata::audio::UniqueFields::Track { artists, album, .. } => (
+                    artists
+                        .iter()
+                        .map(|artist| artist.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    album.clone(),
+                ),
+                librespot::metadata::audio::UniqueFields::Episode { show_name, .. } => {
+                    (show_name.clone(), "Episode".to_string())
+                }
+                librespot::metadata::audio::UniqueFields::Local { artists, album, .. } => (
+                    artists.clone().unwrap_or_default(),
+                    album.clone().unwrap_or_default(),
+                ),
+            };
+            inner.snapshot.now_playing = Some(NowPlaying {
+                uri: audio_item.uri.clone(),
+                title: audio_item.name.clone(),
+                artists,
+                album,
+                cover_url: audio_item.covers.first().map(|cover| cover.url.clone()),
+                duration_ms: audio_item.duration_ms as u64,
+            });
+        }
+        PlayerEvent::Playing { position_ms, .. } => {
+            inner.local_player_active = true;
+            inner.snapshot.is_playing = true;
+            inner.snapshot.position_ms = position_ms as u64;
+            inner.updated_at = now;
+        }
+        PlayerEvent::Paused { position_ms, .. } => {
+            inner.local_player_active = true;
+            inner.snapshot.is_playing = false;
+            inner.snapshot.position_ms = position_ms as u64;
+            inner.updated_at = now;
+        }
+        PlayerEvent::Seeked { position_ms, .. }
+        | PlayerEvent::PositionCorrection { position_ms, .. }
+        | PlayerEvent::PositionChanged { position_ms, .. } => {
+            inner.snapshot.position_ms = position_ms as u64;
+            inner.updated_at = now;
+        }
+        PlayerEvent::Loading { position_ms, .. } => {
+            inner.local_player_active = true;
+            inner.snapshot.is_playing = false;
+            inner.snapshot.position_ms = position_ms as u64;
+            inner.updated_at = now;
+        }
+        PlayerEvent::Stopped { .. } => {
+            inner.local_player_active = false;
+            inner.snapshot.is_playing = false;
+            inner.snapshot.position_ms = 0;
+            inner.snapshot.now_playing = None;
+            inner.updated_at = now;
+        }
+        PlayerEvent::Unavailable { .. } => {
+            inner.local_player_active = false;
+            inner.snapshot.position_ms = inner.snapshot_at(now).position_ms;
+            inner.updated_at = now;
+            inner.snapshot.is_playing = false;
+        }
+        PlayerEvent::VolumeChanged { volume } => {
+            inner.snapshot.volume_percent = ((volume as u32 * 100) / u16::MAX as u32) as u8;
+        }
+        PlayerEvent::ShuffleChanged { shuffle } => {
+            inner.snapshot.shuffle = shuffle;
+        }
+        PlayerEvent::RepeatChanged { context, .. } => {
+            inner.snapshot.repeat = context;
+        }
+        _ => {}
+    }
 }
 
 fn spawn_connect_state_event_loop(
@@ -782,9 +830,11 @@ fn spawn_connect_state_event_loop(
                 continue;
             };
 
-            // Server state can lag local automatic track changes. Local player events own
-            // metadata and the position clock while this device is active.
-            if remote.active_device_id == session.device_id() {
+            // Connect can still describe the previous device during a local handoff.
+            // The player event stream owns transport state until it stops.
+            if remote.active_device_id == session.device_id()
+                || playback.lock().unwrap().local_player_active
+            {
                 resolved_uri.clear();
                 continue;
             }
@@ -792,11 +842,7 @@ fn spawn_connect_state_event_loop(
             if remote.track_uri.is_empty() {
                 if remote.active_device_id != session.device_id() {
                     let mut inner = playback.lock().unwrap();
-                    inner.snapshot.now_playing = None;
-                    inner.snapshot.is_playing = false;
-                    inner.snapshot.position_ms = 0;
-                    inner.snapshot.context_uri = None;
-                    inner.updated_at = Instant::now();
+                    inner.apply_connect_state(&remote, session.device_id(), Instant::now());
                     resolved_uri.clear();
                 }
                 continue;
@@ -841,19 +887,7 @@ fn spawn_connect_state_event_loop(
                 continue;
             }
             let mut inner = playback.lock().unwrap();
-            if inner
-                .snapshot
-                .now_playing
-                .as_ref()
-                .is_some_and(|track| track.uri == remote.track_uri)
-            {
-                inner.snapshot.is_playing = false;
-                inner.snapshot.position_ms = remote.position_ms;
-                if !remote.context_uri.is_empty() {
-                    inner.snapshot.context_uri = Some(remote.context_uri);
-                }
-                inner.updated_at = Instant::now();
-            }
+            inner.apply_connect_state(&remote, session.device_id(), Instant::now());
         }
     });
 }
@@ -865,7 +899,10 @@ fn apply_remote_now_playing(
     now_playing: NowPlaying,
 ) {
     // Hydration may finish after the server changes tracks or playback returns locally.
-    if remote.active_device_id == local_device_id || remote.track_uri != now_playing.uri {
+    if remote.active_device_id == local_device_id
+        || inner.local_player_active
+        || remote.track_uri != now_playing.uri
+    {
         return;
     }
     inner.snapshot.now_playing = Some(now_playing);
@@ -1040,6 +1077,201 @@ fn restrict_private_dir(_path: &std::path::Path) {}
 mod tests {
     use super::*;
 
+    const TEST_TRACK_URI: &str = "spotify:track:0000000000000000000000";
+
+    fn playback_clock(now: Instant) -> PlaybackInner {
+        PlaybackInner {
+            snapshot: PlaybackSnapshot {
+                now_playing: Some(NowPlaying {
+                    uri: TEST_TRACK_URI.into(),
+                    duration_ms: 180_000,
+                    ..Default::default()
+                }),
+                position_ms: 60_000,
+                ..Default::default()
+            },
+            updated_at: now,
+            local_player_active: false,
+        }
+    }
+
+    fn test_track_id() -> librespot::core::SpotifyUri {
+        librespot::core::SpotifyUri::from_uri(TEST_TRACK_URI).unwrap()
+    }
+
+    #[test]
+    fn stale_connect_polls_cannot_rewind_local_playback() {
+        let start = Instant::now();
+        let mut inner = playback_clock(start);
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Playing {
+                play_request_id: 1,
+                track_id: test_track_id(),
+                position_ms: 60_000,
+            },
+            start,
+        );
+        let remote = librespot::connect::RemotePlayerState {
+            track_uri: TEST_TRACK_URI.into(),
+            active_device_id: "previous-spotify-device".into(),
+            position_ms: 12_000,
+            ..Default::default()
+        };
+        for tick in 1..=6 {
+            let now = start + Duration::from_millis(tick * 500);
+            inner.apply_connect_state(&remote, "rspotify-device", now);
+            let snapshot = inner.snapshot_at(now);
+            assert!(snapshot.is_playing);
+            assert_eq!(snapshot.position_ms, 60_000 + tick * 500);
+            apply_player_event(
+                &mut inner,
+                PlayerEvent::PositionChanged {
+                    play_request_id: 1,
+                    track_id: test_track_id(),
+                    position_ms: (60_000 + tick * 500) as u32,
+                },
+                now,
+            );
+            assert_eq!(
+                inner
+                    .snapshot_at(now + Duration::from_millis(250))
+                    .position_ms,
+                60_000 + tick * 500 + 250
+            );
+        }
+        // A stale empty remote selection must not clear the local track either.
+        inner.apply_connect_state(&Default::default(), "rspotify-device", start);
+        assert!(inner.snapshot.now_playing.is_some());
+    }
+
+    #[test]
+    fn local_connect_context_poll_does_not_reset_position_anchor() {
+        let start = Instant::now();
+        let mut inner = playback_clock(start);
+        inner.snapshot.is_playing = true;
+        let remote = librespot::connect::RemotePlayerState {
+            track_uri: TEST_TRACK_URI.into(),
+            active_device_id: "rspotify-device".into(),
+            context_uri: "spotify:playlist:example".into(),
+            ..Default::default()
+        };
+        for tick in 1..=6 {
+            let now = start + Duration::from_millis(tick * 500);
+            inner.apply_connect_state(&remote, "rspotify-device", now);
+            assert_eq!(inner.snapshot_at(now).position_ms, 60_000 + tick * 500);
+        }
+        assert_eq!(inner.updated_at, start);
+        assert_eq!(inner.snapshot.context_uri, Some(remote.context_uri));
+    }
+
+    #[test]
+    fn local_pause_and_backward_seek_remain_authoritative() {
+        let start = Instant::now();
+        let mut inner = playback_clock(start);
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Paused {
+                play_request_id: 1,
+                track_id: test_track_id(),
+                position_ms: 65_000,
+            },
+            start,
+        );
+        let remote = librespot::connect::RemotePlayerState {
+            track_uri: TEST_TRACK_URI.into(),
+            active_device_id: "previous-device".into(),
+            position_ms: 12_000,
+            ..Default::default()
+        };
+        let later = start + Duration::from_secs(2);
+        inner.apply_connect_state(&remote, "rspotify-device", later);
+        assert_eq!(inner.snapshot_at(later).position_ms, 65_000);
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Seeked {
+                play_request_id: 1,
+                track_id: test_track_id(),
+                position_ms: 10_000,
+            },
+            later,
+        );
+        assert_eq!(inner.snapshot_at(later).position_ms, 10_000);
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Playing {
+                play_request_id: 1,
+                track_id: test_track_id(),
+                position_ms: 10_000,
+            },
+            later,
+        );
+        inner.apply_connect_state(&remote, "rspotify-device", later);
+        assert_eq!(
+            inner
+                .snapshot_at(later + Duration::from_secs(1))
+                .position_ms,
+            11_000
+        );
+    }
+
+    #[test]
+    fn loading_claims_local_clock_and_stopping_releases_it() {
+        let start = Instant::now();
+        let mut inner = playback_clock(start);
+        inner.snapshot.is_playing = true;
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Loading {
+                play_request_id: 1,
+                track_id: test_track_id(),
+                position_ms: 20_000,
+            },
+            start,
+        );
+        assert!(inner.local_player_active);
+        assert!(!inner.snapshot.is_playing);
+        assert_eq!(
+            inner
+                .snapshot_at(start + Duration::from_secs(1))
+                .position_ms,
+            20_000
+        );
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Stopped {
+                play_request_id: 1,
+                track_id: test_track_id(),
+            },
+            start,
+        );
+        assert!(!inner.local_player_active);
+        let remote = librespot::connect::RemotePlayerState {
+            track_uri: TEST_TRACK_URI.into(),
+            active_device_id: "other-device".into(),
+            position_ms: 42_000,
+            metadata: [("title".into(), "Remote track".into())].into(),
+            ..Default::default()
+        };
+        inner.snapshot.now_playing = now_playing_from_remote(&remote, None);
+        inner.apply_connect_state(&remote, "rspotify-device", start);
+        assert_eq!(inner.snapshot.position_ms, 42_000);
+        assert!(!inner.snapshot.is_playing);
+    }
+
+    #[test]
+    fn extrapolated_playback_is_clamped_to_track_duration() {
+        let start = Instant::now();
+        let mut inner = playback_clock(start);
+        inner.snapshot.is_playing = true;
+        assert_eq!(
+            inner
+                .snapshot_at(start + Duration::from_secs(200))
+                .position_ms,
+            180_000
+        );
+    }
+
     #[test]
     fn stale_connect_metadata_cannot_replace_the_next_local_song() {
         let next_song = NowPlaying {
@@ -1057,6 +1289,7 @@ mod tests {
         let mut inner = PlaybackInner {
             snapshot: snapshot.clone(),
             updated_at: Instant::now(),
+            local_player_active: true,
         };
         let updated_at = inner.updated_at;
         let remote = librespot::connect::RemotePlayerState {
@@ -1082,6 +1315,7 @@ mod tests {
         let mut inner = PlaybackInner {
             snapshot: PlaybackSnapshot::default(),
             updated_at: Instant::now(),
+            local_player_active: false,
         };
         let remote = librespot::connect::RemotePlayerState {
             active_device_id: "other-device".into(),
