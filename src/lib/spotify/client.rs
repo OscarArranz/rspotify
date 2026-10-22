@@ -184,13 +184,15 @@ impl NativeSpotify {
             store.set_refresh_token(&token.refresh_token);
         }
 
-        Self::connect(token.access_token, device_id, client_id)
+        let initial_volume = store.volume_percent();
+        Self::connect(token.access_token, device_id, client_id, initial_volume)
     }
 
     fn connect(
         access_token: String,
         device_id: String,
         client_id: String,
+        initial_volume: u8,
     ) -> Result<Self, SpotifyError> {
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -226,6 +228,9 @@ impl NativeSpotify {
 
         let credentials = Credentials::with_access_token(access_token);
         let mixer = Arc::new(SoftMixer::open(MixerConfig::default())?);
+        let initial_volume = initial_volume.min(100);
+        let initial_volume_value = (initial_volume as u32 * u16::MAX as u32 / 100) as u16;
+        mixer.set_volume(initial_volume_value);
         let player_config = PlayerConfig {
             position_update_interval: Some(Duration::from_millis(500)),
             ..Default::default()
@@ -241,7 +246,7 @@ impl NativeSpotify {
         let connect_config = ConnectConfig {
             name: CONNECT_DEVICE_NAME.to_string(),
             device_type: DeviceType::Computer,
-            initial_volume: 50 * (u16::MAX / 100),
+            initial_volume: initial_volume_value,
             ..Default::default()
         };
 
@@ -258,7 +263,10 @@ impl NativeSpotify {
         runtime.spawn(spirc_task);
 
         let playback = Arc::new(Mutex::new(PlaybackInner {
-            snapshot: PlaybackSnapshot::default(),
+            snapshot: PlaybackSnapshot {
+                volume_percent: initial_volume,
+                ..PlaybackSnapshot::default()
+            },
             updated_at: Instant::now(),
         }));
         spawn_player_event_loop(&runtime, &player, playback.clone());
@@ -566,6 +574,8 @@ impl NativeSpotify {
             .spirc
             .set_volume(value)
             .map_err(|error| SpotifyError::Playback(error.to_string()))?;
+        let mut store = SessionStore::load();
+        store.set_volume_percent(percent.min(100));
         let mut playback = self.inner.playback.lock().unwrap();
         playback.snapshot.volume_percent = percent.min(100);
         Ok(())
