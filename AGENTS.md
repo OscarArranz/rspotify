@@ -5,6 +5,14 @@ These instructions apply to all coding agents and contributors working in this r
 ## Project
 
 - rspotify is a Rust + GPUI desktop Spotify client.
+- Spotify desktop is installed as a Flatpak on the development machine. The original icon was
+  sourced from its `com.spotify.Client` Flatpak, but rspotify must bundle and use its own copy;
+  never depend on the Flatpak remaining installed. Keep `WindowOptions.app_id`, the Linux desktop
+  entry ID, and the bundled icon name aligned as `rspotify` so it remains distinct from Spotify.
+  For Linux `cargo run` icon testing, run `scripts/install-dev-desktop-entry.sh` to register the
+  project-owned desktop entry and icon in the user's XDG data directories. Build first; the script
+  accepts an optional executable path for release/custom target directories. On KDE, refresh both
+  service metadata and the icon loader; `kbuildsycoca6` alone does not invalidate panel icon caches.
 - It uses Spotify's native desktop services, not the public Web API: OAuth with Spotify's desktop
   client id, librespot login5/Spotify Connect, Pathfinder GraphQL, and the SpClient rootlist.
 - Playback requires **Spotify Premium**. Keep that statement in the README and in user-facing text.

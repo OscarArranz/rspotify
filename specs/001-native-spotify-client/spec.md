@@ -87,6 +87,10 @@ the user's library, and play audio locally through a Spotify Connect device.
 
 ### UI and state
 
+- Linux development runs use the bundled Spotify icon with an independent `rspotify` desktop
+  identity, without requiring the Spotify Flatpak. A user-local setup command registers a working
+  development launcher and refreshes both desktop-entry and icon-loader caches on KDE.
+
 - `AppState` owns the authenticated `NativeSpotify` handle and cached display profile. A cached
   profile can make the UI optimistically logged in before the client is restored; the titlebar and
   main layout observe global state as restoration completes.

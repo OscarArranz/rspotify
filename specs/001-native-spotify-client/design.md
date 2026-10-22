@@ -14,6 +14,13 @@ and rootlist calls are blocking. Those calls run on worker threads, and results 
 
 ## Module boundaries
 
+Linux desktop integration is owned by `data/rspotify.desktop` and
+`scripts/install-dev-desktop-entry.sh`. The installer copies `assets/icons/rspotify.svg` to XDG
+data storage and generates a desktop entry with explicit paths to that installed icon and the
+development executable. GPUI sets `app_id` to `rspotify`. KDE's service database refresh and
+`org.kde.KIconLoader.iconChanged` notification are separate: rebuilding the former alone does not
+invalidate a running panel's icon-loader cache. No desktop restart or Flatpak resource is required.
+
 | Module | Responsibility |
 | --- | --- |
 | `src/lib/spotify/client.rs` | OAuth with desktop client id, session store handoff, librespot `Session`/`Spirc`/`Player`, Connect device registration, rootlist/profile fetches, playback commands and snapshot |

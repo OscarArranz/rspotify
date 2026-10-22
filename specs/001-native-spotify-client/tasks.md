@@ -53,6 +53,21 @@
 
 ## Follow-ups
 
+### Linux development icon fix
+
+- [x] Inspect live KWin identity: `resourceClass=rspotify`, `desktopFileName=rspotify`.
+- [x] Verify Qt can render the installed SVG and a fresh Plasma launcher model resolves it.
+- [x] Generate a launcher with an explicit executable and installed bundled-icon path; notify
+  KDE's icon loader independently of its service database.
+- [x] Test installation in isolated XDG directories and validate the installed desktop entry.
+  `python3 scripts/test_dev_desktop_entry.py`: two tests pass (paths with spaces, repeated install,
+  missing executable). Installed desktop file passes `desktop-file-validate`.
+- [x] Verify the existing KDE taskbar displays the icon (not just the window decoration).
+  Captured the running KDE panel after setup: rspotify's active task button shows the green
+  Spotify icon. Local evidence: `/tmp/opencode/rspotify-taskbar-check.png`. The temporary test
+  app and KWin diagnostic script were closed/unloaded; no login or audio playback was performed.
+- [x] `cargo fmt --check`, `cargo check`, `cargo test` (10 passed, 3 account tests ignored).
+
 - [ ] Playlist detail, album/artist pages, queue, and lyrics.
 - [ ] Search pagination, debouncing, keyboard focus, and empty-result polish.
 - [ ] Shuffle/repeat controls in the player bar.
