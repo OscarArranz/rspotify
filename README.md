@@ -10,6 +10,8 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 - **Persistent session**: the refresh token, stable device id, and cached profile details are stored in `~/.cache/rspotify/`. Returning users see the app immediately while the session refreshes in the background; the browser login is only needed once.
 - **Playlist detail**: saved playlists and Liked Songs open in a Spotify-style page with a large header, virtualized track list, local search, sort, and context playback.
 - **Spotify-style UI**: custom titlebar, library sidebar, tabbed search results, playlist pages and a now-playing bar, built with GPUI.
+- **Smooth scrolling**: shared easing for wheel and touchpad input in the library, search results,
+  horizontal carousels, and virtualized playlists.
 
 > **Spotify Premium is required for playback.** Free accounts can sign in and search, but Spotify does not permit playback through this kind of client.
 
@@ -47,6 +49,10 @@ sudo apt install libasound2-dev
 ```bash
 cargo run --release
 ```
+
+Use the release build when evaluating UI responsiveness; the default `cargo run` uses unoptimized
+application and dependency code. For optional scroll frame-callback timing summaries, run
+`RSPOTIFY_SCROLL_METRICS=1 cargo run --release`. These report aggregate timing only, not account data.
 
 Then press **Log in with Spotify**. A browser window opens at Spotify's login page; after
 authorising, the loopback callback returns to the app automatically.

@@ -4,13 +4,16 @@ use futures::channel::oneshot;
 use gpui::{
     AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
-    StatefulInteractiveElement, Styled, Window, canvas, div, img, px, relative, rgb, svg,
+    ScrollHandle, StatefulInteractiveElement, Styled, Window, canvas, div, img, px, relative, rgb,
+    svg,
 };
 
 use crate::lib::spotify::{LibraryPlaylist, NativeSpotify, PlaybackSnapshot, PlaylistSource};
 use crate::router::{StackRouter, StackRouterHandle};
 use crate::state::AppState;
+use crate::view::components::render_cache::{cached_bar, cached_fill};
 use crate::view::components::resizable::{h_resizable, resizable_panel};
+use crate::view::components::smooth_scroll::{ScrollAxis, SmoothScrollElement, SmoothScrollState};
 use crate::view::screens::playlist::{PlaylistScreen, render_cover};
 
 const PANEL_MARGIN: f32 = 9.0;
@@ -136,18 +139,20 @@ impl Render for MainLayout {
                         .child(
                             resizable_panel()
                                 .size(px(340.0))
-                                .child(self.library.clone()),
+                                .child(cached_fill(self.library.clone())),
                         )
-                        .child(resizable_panel().child(self.stack_router.clone())),
+                        .child(resizable_panel().child(cached_fill(self.stack_router.clone()))),
                 ),
             )
-            .children(self.player.clone())
+            .children(self.player.clone().map(|player| cached_bar(player, 76.0)))
     }
 }
 
 struct LibrarySidebar {
     entries: Vec<LibraryPlaylist>,
     client: Option<NativeSpotify>,
+    scroll_handle: ScrollHandle,
+    scroll_state: SmoothScrollState,
 }
 
 impl LibrarySidebar {
@@ -155,6 +160,8 @@ impl LibrarySidebar {
         let sidebar = Self {
             entries: Vec::new(),
             client: client.clone(),
+            scroll_handle: ScrollHandle::new(),
+            scroll_state: SmoothScrollState::new(cx.entity_id()),
         };
         if let Some(client) = client {
             cx.spawn(async move |this, cx| {
@@ -336,6 +343,11 @@ impl Render for LibrarySidebar {
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_y_scroll()
+                    .smooth_scroll(
+                        self.scroll_handle.clone(),
+                        ScrollAxis::Vertical,
+                        self.scroll_state.clone(),
+                    )
                     .children(entries),
             )
             .children(self.entries.is_empty().then(|| {

@@ -2,11 +2,12 @@
 
 use futures::channel::oneshot;
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement,
-    Styled, Window, div, img, prelude::FluentBuilder, px, rgb, svg,
+    Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle,
+    StatefulInteractiveElement, Styled, Window, div, img, prelude::FluentBuilder, px, rgb, svg,
 };
 
 use crate::lib::spotify::{NativeSpotify, SearchItem, SearchResults};
+use crate::view::components::smooth_scroll::{ScrollAxis, SmoothScrollElement, SmoothScrollState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SearchTab {
@@ -54,6 +55,16 @@ pub(crate) struct SearchScreen {
     results: SearchResults,
     status: SearchStatus,
     request_generation: u64,
+    vertical_scroll: ScrollHandle,
+    featured_scroll: ScrollHandle,
+    playlist_scroll: ScrollHandle,
+    podcast_scroll: ScrollHandle,
+    artist_scroll: ScrollHandle,
+    vertical_scroll_state: SmoothScrollState,
+    featured_scroll_state: SmoothScrollState,
+    playlist_scroll_state: SmoothScrollState,
+    podcast_scroll_state: SmoothScrollState,
+    artist_scroll_state: SmoothScrollState,
 }
 
 impl SearchScreen {
@@ -70,6 +81,16 @@ impl SearchScreen {
             results: SearchResults::default(),
             status: SearchStatus::Idle,
             request_generation: 0,
+            vertical_scroll: ScrollHandle::new(),
+            featured_scroll: ScrollHandle::new(),
+            playlist_scroll: ScrollHandle::new(),
+            podcast_scroll: ScrollHandle::new(),
+            artist_scroll: ScrollHandle::new(),
+            vertical_scroll_state: SmoothScrollState::new(cx.entity_id()),
+            featured_scroll_state: SmoothScrollState::new(cx.entity_id()),
+            playlist_scroll_state: SmoothScrollState::new(cx.entity_id()),
+            podcast_scroll_state: SmoothScrollState::new(cx.entity_id()),
+            artist_scroll_state: SmoothScrollState::new(cx.entity_id()),
         };
         screen.fetch_results(cx);
         screen
@@ -252,6 +273,11 @@ impl Render for SearchScreen {
             .bg(rgb(0x121212))
             .rounded_lg()
             .overflow_y_scroll()
+            .smooth_scroll(
+                self.vertical_scroll.clone(),
+                ScrollAxis::Vertical,
+                self.vertical_scroll_state.clone(),
+            )
             .child(div().flex().gap(px(8.0)).children(tabs))
             .children(
                 status.map(|message| div().py(px(24.0)).text_color(rgb(0xb3b3b3)).child(message)),
@@ -335,6 +361,11 @@ impl Render for SearchScreen {
                             .flex()
                             .gap(px(8.0))
                             .overflow_x_scroll()
+                            .smooth_scroll(
+                                self.featured_scroll.clone(),
+                                ScrollAxis::Horizontal,
+                                self.featured_scroll_state.clone(),
+                            )
                             .children(
                                 self.results
                                     .albums
@@ -368,6 +399,11 @@ impl Render for SearchScreen {
                                 .flex()
                                 .gap(px(8.0))
                                 .overflow_x_scroll()
+                                .smooth_scroll(
+                                    self.playlist_scroll.clone(),
+                                    ScrollAxis::Horizontal,
+                                    self.playlist_scroll_state.clone(),
+                                )
                                 .children(
                                     self.results
                                         .playlists
@@ -390,6 +426,11 @@ impl Render for SearchScreen {
                                 .flex()
                                 .gap(px(8.0))
                                 .overflow_x_scroll()
+                                .smooth_scroll(
+                                    self.podcast_scroll.clone(),
+                                    ScrollAxis::Horizontal,
+                                    self.podcast_scroll_state.clone(),
+                                )
                                 .children(
                                     self.results
                                         .podcasts
@@ -412,6 +453,11 @@ impl Render for SearchScreen {
                                 .flex()
                                 .gap(px(8.0))
                                 .overflow_x_scroll()
+                                .smooth_scroll(
+                                    self.artist_scroll.clone(),
+                                    ScrollAxis::Horizontal,
+                                    self.artist_scroll_state.clone(),
+                                )
                                 .children(
                                     self.results
                                         .artists
