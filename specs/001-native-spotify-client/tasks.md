@@ -37,7 +37,8 @@
   - Returned 20 tracks, 20 artists, and 20 albums for the test query.
   - Profile name and avatar resolved.
   - Library returned 108 playlists.
-  - Playback snapshot was empty after login, confirming no accidental autoplay.
+  - No playback started on login; the initial player snapshot may now reflect paused server-side
+    Connect state.
 - [x] Real-account playback smoke test:
   `cargo test --bin rspotify_client smoke_native_playback -- --ignored --nocapture`
   - A test track reached roughly 2.3 seconds of playback and then paused.

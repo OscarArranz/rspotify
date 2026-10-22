@@ -5,6 +5,7 @@ edition = "2024"
 
 [workspace]
 members = [".", "reqwest_client"]
+exclude = ["vendor/librespot-connect"]
 
 [workspace.package]
 edition = "2024"
@@ -38,3 +39,4 @@ windows = { version = "0.62.2", features = ["Wdk_System_SystemServices", "Win32_
 [patch.crates-io]
 ashpd-011 = { package = "ashpd", path = "vendor/ashpd-0.11.0" }
 ashpd-012 = { package = "ashpd", path = "vendor/ashpd-0.12.0" }
+librespot-connect = { path = "vendor/librespot-connect" }
