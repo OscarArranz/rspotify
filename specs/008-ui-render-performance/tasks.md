@@ -19,3 +19,8 @@
   child or scrolling it leaves its sibling's render count unchanged. Resizing redraws both.
 - Added opt-in aggregate scroll frame-callback metrics for the next optimized manual test. These
   measure callback spacing (including display pacing), not the time spent rendering on CPU/GPU.
+- First optimized manual session produced 43 timing batches / 480 callback intervals. Weighted
+  mean of logged batch means: approximately 16.30 ms; worst interval: 32.83 ms. Three batches had
+  an interval over 30 ms. This suggests mostly 60 Hz-like pacing with occasional missed intervals,
+  not proof of steady presented FPS or an improvement over an unmeasured baseline. No CPU/GPU
+  profile identifies the remaining stalls yet; user's subjective comparison remains pending.
