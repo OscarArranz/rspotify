@@ -90,6 +90,9 @@ fn main() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Keep rspotify distinct from the Spotify desktop client. The packaged
+                    // `rspotify.desktop` entry and bundled icon use this same ID.
+                    app_id: Some("rspotify".into()),
                     titlebar: Some(TitlebarOptions {
                         appears_transparent: true,
                         title: Some("Spotify".into()),

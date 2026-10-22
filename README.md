@@ -54,6 +54,22 @@ authorising, the loopback callback returns to the app automatically.
 No Spotify Developer app is required. The client uses the same public desktop client id as
 the official client and librespot.
 
+### Linux desktop icon during development
+
+After building, register the project-owned icon and development launcher once:
+
+```sh
+cargo build
+scripts/install-dev-desktop-entry.sh
+cargo run
+```
+
+This installs `rspotify.desktop` and the bundled SVG under `${XDG_DATA_HOME:-~/.local/share}`.
+It uses the built executable's absolute path and refreshes KDE's service and icon-loader caches.
+Spotify's Flatpak is not required. Rerun setup if you move the checkout; pass an executable path
+as the first argument for release builds or a custom Cargo target directory. The installer uses
+Python 3 to escape paths in the desktop entry. It does not launch the app or access your account.
+
 ### Configuration
 
 All configuration is optional. Put overrides in `.env` or export them:
