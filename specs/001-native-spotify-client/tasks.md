@@ -29,6 +29,7 @@
 - [x] Persist cached profile details and restore returning sessions optimistically at startup.
 - [x] Keep cached UI on transient startup restoration errors; clear invalid credentials and route
   to sign-in only after confirmed rejection.
+- [x] Show custom titlebar window controls only on Windows, leaving Linux system decorations intact.
 
 ## Validation
 

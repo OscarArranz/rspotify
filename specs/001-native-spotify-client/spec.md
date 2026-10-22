@@ -19,6 +19,8 @@ the user's library, and play audio locally through a Spotify Connect device.
 - After sign-in, the titlebar shows back/forward navigation, the home button, search, notification
   and friends placeholders, and the user's avatar. The library sidebar lists the user's saved
   playlists. The player bar shows the current track, progress, and playback controls.
+- Custom minimize, maximize, and close controls are shown on Windows only; Linux keeps its system
+  window decorations without duplicate controls in the titlebar.
 - Search is grouped into All, Songs, Artists, Albums, Playlists, and Podcasts & Shows tabs.
   Clicking a track or episode starts single-track playback; clicking another result starts that
   context.
