@@ -13,19 +13,26 @@
 ## Behavior
 
 GPUI scrollable divs currently apply incoming wheel deltas directly to their offsets. The shared
-helper will preserve precise touchpad deltas while easing coarse line-based wheel movement over a
-short animation. It must not block GPUI's foreground thread. Horizontal/vertical direction and
+helper owns the scroll offset and eases both pixel and line deltas: Linux wheel events can be
+pixel-based too. Scrollable divs use clipped overflow plus a tracked handle, disabling GPUI's
+immediate wheel movement; the helper consumes input only when the requested axis can move.
+Repeated input accumulates toward a clamped target; reversing direction discards stale momentum.
+Frames follow a time-based exponential curve and stop once settled. It must not block GPUI's
+foreground thread. Horizontal/vertical direction and
 existing parent/child scroll ownership are preserved; the helper must not consume gestures that the
 child cannot handle.
 
 The playlist remains one variable-height virtualized GPUI list. Smoothing must preserve the
-`ListScrollEvent` pagination threshold and existing programmatic top resets.
+pagination threshold and existing programmatic top resets. A scroll-only canvas above the list
+handles bubble-phase input before the list's native wheel listener; clicks remain unaffected.
+Animation updates notify pagination from the actual visible rows, not an intermediate wheel jump.
 
 ## State ownership
 
 Each scroll surface owns its animation state through a stable GPUI scroll handle or entity state.
 Animation tasks are cancelled/replaced when a newer wheel event arrives and end at the latest
-requested offset. No global application state or new dependency is introduced.
+requested offset. No global application state or runtime dependency is introduced. Enable the
+existing GPUI dependency's `test-support` feature for headless wheel-dispatch regression tests.
 
 ## Validation
 

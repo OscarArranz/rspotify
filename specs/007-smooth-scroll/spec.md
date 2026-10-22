@@ -8,7 +8,8 @@ search results, horizontal search carousels, and playlist detail screens.
 ## User-visible scope
 
 - Mouse-wheel scrolling should ease into position instead of jumping in discrete steps.
-- Precise touchpad scrolling should remain responsive and preserve its direction and relative movement.
+- Both pixel-based and line-based events are smoothed; pixel events must not be assumed to be
+  inherently smooth. Touchpad scrolling preserves direction and accumulated movement with short easing.
 - Both vertical and horizontal scroll surfaces should use the same behavior.
 - Existing playlist virtualization, pagination, nested scrolling, and scroll boundaries must continue
   to work.

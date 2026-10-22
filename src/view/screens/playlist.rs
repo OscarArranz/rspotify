@@ -6,6 +6,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::view::components::smooth_scroll::{SmoothScrollState, list_scroll_overlay};
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use gpui::{
@@ -76,7 +77,7 @@ pub(crate) struct PlaylistScreen {
     next_page_loading: bool,
     next_page_error: Option<String>,
     action_error: Option<String>,
-    scroll_animation_generation: u64,
+    scroll_animation: SmoothScrollState,
 }
 
 impl PlaylistScreen {
@@ -109,7 +110,7 @@ impl PlaylistScreen {
             next_page_loading: false,
             next_page_error: None,
             action_error: None,
-            scroll_animation_generation: 0,
+            scroll_animation: SmoothScrollState::default(),
         };
         if matches!(this.source, PlaylistSource::LikedSongs) {
             if let Some(detail) = this.client.loaded_liked_songs_detail() {
@@ -129,6 +130,7 @@ impl PlaylistScreen {
         self.next_page_loading = false;
         self.next_page_error = None;
         self.action_error = None;
+        self.scroll_animation.cancel();
         self.list_state.reset(self.item_count().max(1));
 
         let client = self.client.clone();
@@ -173,6 +175,7 @@ impl PlaylistScreen {
         self.action_error = None;
         self.rebuild_visible();
         self.state = LoadState::Loaded;
+        self.scroll_animation.cancel();
         self.list_state.reset(self.item_count());
         cx.notify();
     }
@@ -238,52 +241,24 @@ impl PlaylistScreen {
         self.load_next_page(next_page_url, cx);
     }
 
-    fn smooth_list_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
-        // GPUI lists already receive smooth pixel deltas from touchpads. Ease only coarse
-        // wheel steps, matching the ordinary scrollable divs.
-        if event.delta.precise() {
-            return;
-        }
-
-        // ListState applies wheel movement as the negative of the event's y delta. This
-        // listener is on a parent, so the list has processed the event before we get here.
-        let distance = -event.delta.pixel_delta(px(20.0)).y;
-        if distance == px(0.0) {
-            return;
-        }
-
-        self.list_state.scroll_by(-distance);
-        self.scroll_animation_generation = self.scroll_animation_generation.wrapping_add(1);
-        let generation = self.scroll_animation_generation;
-        let duration = Duration::from_millis(150);
-        let started = std::time::Instant::now();
-        let mut previous_progress = 0.0_f32;
-
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let progress =
-                    (started.elapsed().as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0);
-                let eased = 1.0 - (1.0 - progress).powi(3);
-                let step = distance * (eased - previous_progress);
-                let finished = progress >= 1.0;
-                let updated = this.update(cx, |this, cx| {
-                    if this.scroll_animation_generation != generation {
-                        return false;
-                    }
-                    this.list_state.scroll_by(step);
-                    cx.notify();
-                    true
-                });
-                if !matches!(updated, Ok(true)) || finished {
-                    break;
-                }
-                previous_progress = eased;
+    fn on_animated_scroll(&mut self, cx: &mut Context<Self>) {
+        let top = self.list_state.logical_scroll_top().item_ix;
+        let bottom = self.list_state.viewport_bounds().bottom();
+        let mut end = top;
+        while end < self.item_count() {
+            match self.list_state.bounds_for_item(end) {
+                Some(bounds) if bounds.top() < bottom => end += 1,
+                _ => break,
             }
-        })
-        .detach();
+        }
+        self.on_scroll(
+            &ListScrollEvent {
+                visible_range: top..end,
+                count: self.item_count(),
+                is_scrolled: top > 0,
+            },
+            cx,
+        );
     }
 
     fn load_next_page(&mut self, next_page_url: String, cx: &mut Context<Self>) {
@@ -435,6 +410,7 @@ impl PlaylistScreen {
     fn cycle_sort(&mut self, cx: &mut Context<Self>) {
         self.sort = self.sort.next();
         self.rebuild_visible();
+        self.scroll_animation.cancel();
         self.list_state.reset(self.item_count());
         cx.notify();
     }
@@ -448,6 +424,7 @@ impl PlaylistScreen {
             }
             window.blur();
             self.rebuild_visible();
+            self.scroll_animation.cancel();
             self.list_state.reset(self.item_count());
             cx.notify();
             return;
@@ -459,6 +436,7 @@ impl PlaylistScreen {
                 if matches!(event, InputEvent::Change) {
                     this.search_query = input.read(cx).value().to_string();
                     this.rebuild_visible();
+                    this.scroll_animation.cancel();
                     this.list_state.reset(this.item_count());
                     cx.notify();
                 }
@@ -1258,10 +1236,8 @@ impl Render for PlaylistScreen {
             self.render_empty_page(header_height, cover_size, cx)
         } else {
             div()
+                .relative()
                 .size_full()
-                .on_scroll_wheel(cx.listener(|this, event, _, cx| {
-                    this.smooth_list_wheel(event, cx);
-                }))
                 .child(
                     list(
                         self.list_state.clone(),
@@ -1271,6 +1247,16 @@ impl Render for PlaylistScreen {
                     )
                     .size_full(),
                 )
+                .child(list_scroll_overlay(
+                    self.list_state.clone(),
+                    self.scroll_animation.clone(),
+                    {
+                        let weak = cx.entity().downgrade();
+                        move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| this.on_animated_scroll(cx));
+                        }
+                    },
+                ))
                 .into_any_element()
         };
 
