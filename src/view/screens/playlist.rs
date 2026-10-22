@@ -76,6 +76,7 @@ pub(crate) struct PlaylistScreen {
     next_page_loading: bool,
     next_page_error: Option<String>,
     action_error: Option<String>,
+    scroll_animation_generation: u64,
 }
 
 impl PlaylistScreen {
@@ -108,6 +109,7 @@ impl PlaylistScreen {
             next_page_loading: false,
             next_page_error: None,
             action_error: None,
+            scroll_animation_generation: 0,
         };
         if matches!(this.source, PlaylistSource::LikedSongs) {
             if let Some(detail) = this.client.loaded_liked_songs_detail() {
@@ -234,6 +236,54 @@ impl PlaylistScreen {
             return;
         };
         self.load_next_page(next_page_url, cx);
+    }
+
+    fn smooth_list_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+        // GPUI lists already receive smooth pixel deltas from touchpads. Ease only coarse
+        // wheel steps, matching the ordinary scrollable divs.
+        if event.delta.precise() {
+            return;
+        }
+
+        // ListState applies wheel movement as the negative of the event's y delta. This
+        // listener is on a parent, so the list has processed the event before we get here.
+        let distance = -event.delta.pixel_delta(px(20.0)).y;
+        if distance == px(0.0) {
+            return;
+        }
+
+        self.list_state.scroll_by(-distance);
+        self.scroll_animation_generation = self.scroll_animation_generation.wrapping_add(1);
+        let generation = self.scroll_animation_generation;
+        let duration = Duration::from_millis(150);
+        let started = std::time::Instant::now();
+        let mut previous_progress = 0.0_f32;
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let progress =
+                    (started.elapsed().as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0);
+                let eased = 1.0 - (1.0 - progress).powi(3);
+                let step = distance * (eased - previous_progress);
+                let finished = progress >= 1.0;
+                let updated = this.update(cx, |this, cx| {
+                    if this.scroll_animation_generation != generation {
+                        return false;
+                    }
+                    this.list_state.scroll_by(step);
+                    cx.notify();
+                    true
+                });
+                if !matches!(updated, Ok(true)) || finished {
+                    break;
+                }
+                previous_progress = eased;
+            }
+        })
+        .detach();
     }
 
     fn load_next_page(&mut self, next_page_url: String, cx: &mut Context<Self>) {
@@ -1207,14 +1257,21 @@ impl Render for PlaylistScreen {
         {
             self.render_empty_page(header_height, cover_size, cx)
         } else {
-            list(
-                self.list_state.clone(),
-                cx.processor(move |this, index, _, cx| {
-                    this.render_item(index, header_height, cover_size, cx)
-                }),
-            )
-            .size_full()
-            .into_any_element()
+            div()
+                .size_full()
+                .on_scroll_wheel(cx.listener(|this, event, _, cx| {
+                    this.smooth_list_wheel(event, cx);
+                }))
+                .child(
+                    list(
+                        self.list_state.clone(),
+                        cx.processor(move |this, index, _, cx| {
+                            this.render_item(index, header_height, cover_size, cx)
+                        }),
+                    )
+                    .size_full(),
+                )
+                .into_any_element()
         };
 
         page.child(content).into_any_element()
