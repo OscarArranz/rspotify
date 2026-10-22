@@ -189,6 +189,7 @@ impl Render for Titlebar {
                                 .items_center()
                                 .gap(px(12.0))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .when(!cfg!(target_os = "windows"), |this: Div| this.mr(px(12.0)))
                                 .child(
                                     div()
                                         .flex()
@@ -201,7 +202,9 @@ impl Render for Titlebar {
                                 .child(self.user_avatar.clone()),
                         )
                     })
-                    .child(WindowControls::new()),
+                    .when(cfg!(target_os = "windows"), |this: Div| {
+                        this.child(WindowControls::new())
+                    }),
             )
     }
 }

@@ -26,6 +26,7 @@
 - [x] Add `AGENTS.md` and this spec so future work follows spec-driven development.
 - [x] Reorder modules in `src/view/components/mod.rs` so the existing code passes
   `cargo fmt --check`.
+- [x] Show custom titlebar window controls only on Windows, leaving Linux system decorations intact.
 
 ## Validation
 
