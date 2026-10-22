@@ -46,6 +46,16 @@ services instead of the public Web API.
 - Connect: `connect-state/v1/...`
 - Pathfinder GraphQL: `https://api-partner.spotify.com/pathfinder/v1/query`
 
+### Connect player state on startup
+
+The librespot 0.8 Connect implementation subscribes to the dealer topic
+`hm://connect-state/v1/cluster`. On connection setup, it registers the device through
+`PUT /connect-state/v1/devices/<device-id>`; the response is a Connect `Cluster` containing
+`player_state` (track URI, context URI, position, duration, and play/pause flags). This response is
+available before calling `Spirc::activate()`, so reading it does not require transferring playback
+to the local device. This behavior is evidenced by the pinned librespot 0.8 source used by this
+project; it is not a claim that the public Web API exposes the same state.
+
 ## Client id and redirect
 
 The desktop login UI and librespot both use:

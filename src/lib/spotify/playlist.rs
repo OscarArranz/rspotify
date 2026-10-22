@@ -414,13 +414,30 @@ fn track_from_context(track: &ContextTrack, added_at: &HashMap<String, i64>) -> 
 }
 
 #[derive(Clone, Debug, Default)]
-struct HydratedTrack {
-    title: String,
-    artist: String,
-    album: String,
-    image_url: Option<String>,
-    duration_ms: u64,
+pub(crate) struct HydratedTrack {
+    pub(crate) title: String,
+    pub(crate) artist: String,
+    pub(crate) album: String,
+    pub(crate) image_url: Option<String>,
+    pub(crate) duration_ms: u64,
     explicit: bool,
+}
+
+pub(crate) async fn fetch_track_metadata(
+    session: &Session,
+    uri: &str,
+) -> Result<Option<HydratedTrack>, SpotifyError> {
+    let kind = if uri.starts_with("spotify:episode:") {
+        ExtensionKind::EPISODE_V4
+    } else if uri.starts_with("spotify:track:") {
+        ExtensionKind::TRACK_V4
+    } else {
+        return Ok(None);
+    };
+    let uris = [uri.to_string()];
+    Ok(fetch_metadata_batch(session, &uris, kind)
+        .await?
+        .remove(uri))
 }
 
 /// Fills in titles, artists, albums, artwork, and durations for context tracks

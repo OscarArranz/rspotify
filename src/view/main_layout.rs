@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use futures::channel::oneshot;
 use gpui::{
-    AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
+    AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
     StatefulInteractiveElement, Styled, Window, canvas, div, img, px, relative, rgb, svg,
 };
 
@@ -54,6 +54,7 @@ pub struct MainLayout {
     stack_router: Entity<StackRouter>,
     library: Entity<LibrarySidebar>,
     player: Option<Entity<PlayerBar>>,
+    client: Option<NativeSpotify>,
 }
 
 impl MainLayout {
@@ -70,19 +71,33 @@ impl MainLayout {
             .try_global::<AppState>()
             .and_then(AppState::spotify_client);
         let library = cx.new(|cx| LibrarySidebar::new(client.clone(), cx));
-        let player = client.map(|client| cx.new(|cx| PlayerBar::new(client, cx)));
+        let player = client
+            .clone()
+            .map(|client| cx.new(|cx| PlayerBar::new(client, cx)));
 
         Self {
             stack_router,
             library,
             player,
+            client,
         }
     }
 }
 
 impl Render for MainLayout {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "space"
+                    && !event.keystroke.modifiers.modified()
+                    && !event.is_held
+                    && window.focused(cx).is_none()
+                    && let Some(client) = &this.client
+                {
+                    let _ = client.play_pause();
+                    cx.stop_propagation();
+                }
+            }))
             .flex()
             .flex_col()
             .size_full()

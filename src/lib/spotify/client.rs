@@ -270,6 +270,7 @@ impl NativeSpotify {
             updated_at: Instant::now(),
         }));
         spawn_player_event_loop(&runtime, &player, playback.clone());
+        spawn_connect_state_event_loop(&runtime, &spirc, &session, playback.clone());
 
         let username = session.username();
         // Authentication already runs on a worker. Decode the collection here so opening
@@ -527,16 +528,50 @@ impl NativeSpotify {
     }
 
     pub fn play_pause(&self) -> Result<(), SpotifyError> {
-        self.inner
-            .spirc
-            .play_pause()
-            .map_err(|error| SpotifyError::Playback(error.to_string()))
+        let snapshot = self.playback();
+        if snapshot.is_playing {
+            self.inner
+                .spirc
+                .play_pause()
+                .map_err(|error| SpotifyError::Playback(error.to_string()))
+        } else {
+            self.start_snapshot_playback(snapshot)
+        }
     }
 
     pub fn play(&self) -> Result<(), SpotifyError> {
+        self.start_snapshot_playback(self.playback())
+    }
+
+    fn start_snapshot_playback(&self, snapshot: PlaybackSnapshot) -> Result<(), SpotifyError> {
+        let Some(track) = snapshot.now_playing else {
+            return self
+                .inner
+                .spirc
+                .play()
+                .map_err(|error| SpotifyError::Playback(error.to_string()));
+        };
+
+        let options = LoadRequestOptions {
+            start_playing: true,
+            seek_to: snapshot.position_ms.min(u32::MAX as u64) as u32,
+            playing_track: Some(PlayingTrack::Uri(track.uri.clone())),
+            ..Default::default()
+        };
+        let request = match snapshot.context_uri {
+            Some(context_uri) if !context_uri.is_empty() => {
+                LoadRequest::from_context_uri(context_uri, options)
+            }
+            _ => LoadRequest::from_tracks(vec![track.uri], options),
+        };
+
         self.inner
             .spirc
-            .play()
+            .activate()
+            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
+        self.inner
+            .spirc
+            .load(request)
             .map_err(|error| SpotifyError::Playback(error.to_string()))
     }
 
@@ -668,6 +703,7 @@ fn spawn_player_event_loop(
                 PlayerEvent::Stopped { .. } => {
                     inner.snapshot.is_playing = false;
                     inner.snapshot.position_ms = 0;
+                    inner.snapshot.now_playing = None;
                     inner.updated_at = Instant::now();
                 }
                 PlayerEvent::Unavailable { .. } => {
@@ -686,6 +722,150 @@ fn spawn_player_event_loop(
             }
         }
     });
+}
+
+fn spawn_connect_state_event_loop(
+    runtime: &Arc<tokio::runtime::Runtime>,
+    spirc: &Spirc,
+    session: &Session,
+    playback: Arc<Mutex<PlaybackInner>>,
+) {
+    let spirc = spirc.clone();
+    let session = session.clone();
+    runtime.spawn(async move {
+        let mut resolved_uri = String::new();
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let Some(remote) = spirc.remote_player_state() else {
+                continue;
+            };
+
+            if remote.track_uri.is_empty() {
+                if remote.active_device_id != session.device_id() {
+                    let mut inner = playback.lock().unwrap();
+                    inner.snapshot.now_playing = None;
+                    inner.snapshot.is_playing = false;
+                    inner.snapshot.position_ms = 0;
+                    inner.snapshot.context_uri = None;
+                    inner.updated_at = Instant::now();
+                    resolved_uri.clear();
+                }
+                continue;
+            }
+
+            let current_uri = playback
+                .lock()
+                .unwrap()
+                .snapshot
+                .now_playing
+                .as_ref()
+                .map(|track| track.uri.clone());
+            if current_uri.as_deref() != Some(remote.track_uri.as_str())
+                && resolved_uri != remote.track_uri
+            {
+                resolved_uri = remote.track_uri.clone();
+                let metadata = playlist::fetch_track_metadata(&session, &remote.track_uri)
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(now_playing) = now_playing_from_remote(&remote, metadata) {
+                    let mut inner = playback.lock().unwrap();
+                    // A newer server update or local player event may have arrived while
+                    // metadata was being fetched; only apply a still-current server item.
+                    if spirc
+                        .remote_player_state()
+                        .is_some_and(|latest| latest.track_uri == remote.track_uri)
+                    {
+                        inner.snapshot.now_playing = Some(now_playing);
+                        inner.snapshot.context_uri =
+                            (!remote.context_uri.is_empty()).then_some(remote.context_uri.clone());
+                    }
+                }
+            }
+
+            let mut inner = playback.lock().unwrap();
+            if inner
+                .snapshot
+                .now_playing
+                .as_ref()
+                .is_some_and(|track| track.uri == remote.track_uri)
+            {
+                let is_local_device = remote.active_device_id == session.device_id();
+                if !is_local_device {
+                    inner.snapshot.is_playing = false;
+                    inner.snapshot.position_ms = remote.position_ms;
+                }
+                if !remote.context_uri.is_empty() {
+                    inner.snapshot.context_uri = Some(remote.context_uri);
+                }
+                inner.updated_at = Instant::now();
+            }
+        }
+    });
+}
+
+fn now_playing_from_remote(
+    remote: &librespot::connect::RemotePlayerState,
+    hydrated: Option<playlist::HydratedTrack>,
+) -> Option<NowPlaying> {
+    let title = hydrated
+        .as_ref()
+        .map(|metadata| metadata.title.clone())
+        .or_else(|| remote_metadata_value(remote, &["title", "name"]))?;
+    let artists = hydrated
+        .as_ref()
+        .map(|metadata| metadata.artist.clone())
+        .unwrap_or_else(|| {
+            remote_metadata_value(remote, &["artist", "artist_name", "artists"]).unwrap_or_default()
+        });
+    let album = hydrated
+        .as_ref()
+        .map(|metadata| metadata.album.clone())
+        .unwrap_or_else(|| {
+            remote_metadata_value(remote, &["album", "album_name"]).unwrap_or_default()
+        });
+    let cover_url = hydrated
+        .as_ref()
+        .and_then(|metadata| metadata.image_url.clone())
+        .or_else(|| {
+            remote_metadata_value(
+                remote,
+                &[
+                    "image_url",
+                    "image_uri",
+                    "album_image_url",
+                    "cover_url",
+                    "imageUrl",
+                ],
+            )
+            .map(|url| image_url_from_id(&url))
+            .filter(|url| !url.is_empty())
+        });
+
+    Some(NowPlaying {
+        uri: remote.track_uri.clone(),
+        title,
+        artists,
+        album,
+        cover_url,
+        duration_ms: hydrated
+            .as_ref()
+            .map(|metadata| metadata.duration_ms)
+            .filter(|duration| *duration > 0)
+            .unwrap_or(remote.duration_ms),
+    })
+}
+
+fn remote_metadata_value(
+    remote: &librespot::connect::RemotePlayerState,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter()
+        .find_map(|key| remote.metadata.get(*key))
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn image_from_json(value: &Value) -> Option<String> {
@@ -764,6 +944,27 @@ fn restrict_private_dir(_path: &std::path::Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_track_display_from_connect_server_metadata() {
+        let remote = librespot::connect::RemotePlayerState {
+            track_uri: "spotify:track:example".into(),
+            position_ms: 12_000,
+            metadata: [
+                ("title".into(), "Server track".into()),
+                ("artist_name".into(), "Server artist".into()),
+                ("album_name".into(), "Server album".into()),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        let track = now_playing_from_remote(&remote, None).expect("server metadata");
+        assert_eq!(track.uri, "spotify:track:example");
+        assert_eq!(track.title, "Server track");
+        assert_eq!(track.artists, "Server artist");
+        assert_eq!(track.album, "Server album");
+    }
 
     /// Manual smoke test. Requires a previously authorised account in
     /// `~/.cache/rspotify/session.json` and network access.
