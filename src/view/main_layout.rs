@@ -54,6 +54,8 @@ pub struct MainLayout {
     stack_router: Entity<StackRouter>,
     library: Entity<LibrarySidebar>,
     player: Option<Entity<PlayerBar>>,
+    has_client: bool,
+    _auth_subscription: gpui::Subscription,
 }
 
 impl MainLayout {
@@ -71,12 +73,34 @@ impl MainLayout {
             .and_then(AppState::spotify_client);
         let library = cx.new(|cx| LibrarySidebar::new(client.clone(), cx));
         let player = client.map(|client| cx.new(|cx| PlayerBar::new(client, cx)));
+        let has_client = player.is_some();
+        let auth_subscription = cx.observe_global::<AppState>(|this, cx| {
+            this.attach_authenticated_client(cx);
+            cx.notify();
+        });
 
         Self {
             stack_router,
             library,
             player,
+            has_client,
+            _auth_subscription: auth_subscription,
         }
+    }
+
+    fn attach_authenticated_client(&mut self, cx: &mut Context<Self>) {
+        if self.has_client {
+            return;
+        }
+        let Some(client) = cx
+            .try_global::<AppState>()
+            .and_then(AppState::spotify_client)
+        else {
+            return;
+        };
+        self.library = cx.new(|cx| LibrarySidebar::new(Some(client.clone()), cx));
+        self.player = Some(cx.new(|cx| PlayerBar::new(client, cx)));
+        self.has_client = true;
     }
 }
 

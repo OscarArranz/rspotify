@@ -5,7 +5,7 @@
 
 use gpui::Global;
 
-use crate::lib::spotify::NativeSpotify;
+use crate::lib::spotify::{NativeSpotify, UserProfile};
 
 /// Global application state accessible from any component.
 ///
@@ -26,6 +26,7 @@ use crate::lib::spotify::NativeSpotify;
 pub struct AppState {
     /// The authenticated native Spotify client.
     spotify: Option<NativeSpotify>,
+    profile: Option<UserProfile>,
 }
 
 impl Global for AppState {}
@@ -38,12 +39,20 @@ impl AppState {
 
     /// Returns true if the user is authenticated.
     pub fn is_authenticated(&self) -> bool {
-        self.spotify.is_some()
+        self.spotify.is_some() || self.profile.is_some()
     }
 
     /// Sets the authenticated Spotify client.
     pub fn set_spotify_client(&mut self, client: NativeSpotify) {
         self.spotify = Some(client);
+    }
+
+    pub fn set_profile(&mut self, profile: UserProfile) {
+        self.profile = Some(profile);
+    }
+
+    pub fn profile(&self) -> Option<UserProfile> {
+        self.profile.clone()
     }
 
     /// Gets a clone of the Spotify client handle.
@@ -55,5 +64,6 @@ impl AppState {
     /// Clears authentication (logout).
     pub fn logout(&mut self) {
         self.spotify = None;
+        self.profile = None;
     }
 }

@@ -26,6 +26,9 @@
 - [x] Add `AGENTS.md` and this spec so future work follows spec-driven development.
 - [x] Reorder modules in `src/view/components/mod.rs` so the existing code passes
   `cargo fmt --check`.
+- [x] Persist cached profile details and restore returning sessions optimistically at startup.
+- [x] Keep cached UI on transient startup restoration errors; clear invalid credentials and route
+  to sign-in only after confirmed rejection.
 
 ## Validation
 
@@ -44,11 +47,11 @@
   - The playback path was unchanged by later UI-only fixes.
 - [x] Manual visual checks of the sign-in screen, authenticated titlebar, library sidebar, search
   tabs, and player bar media controls.
+- [x] `cargo fmt --check`, `cargo check`, and `cargo test` for startup restoration.
+- [ ] Real-account startup restoration and visual validation (requires user-approved network/account access).
 
 ## Follow-ups
 
-- [ ] Auto-login using the stored refresh token without an explicit button press (requires a
-  separate spec and an explicit user decision).
 - [ ] Playlist detail, album/artist pages, queue, and lyrics.
 - [ ] Search pagination, debouncing, keyboard focus, and empty-result polish.
 - [ ] Shuffle/repeat controls in the player bar.

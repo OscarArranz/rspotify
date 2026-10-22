@@ -16,6 +16,15 @@ pub struct StoredSession {
     pub device_id: String,
     /// OAuth refresh token (not an access token).
     pub refresh_token: Option<String>,
+    /// Last known non-secret profile details used to render the app before session refresh.
+    #[serde(default)]
+    pub profile: Option<StoredProfile>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredProfile {
+    pub name: String,
+    pub image_url: Option<String>,
 }
 
 pub struct SessionStore {
@@ -38,6 +47,14 @@ impl SessionStore {
         self.data.refresh_token.as_deref()
     }
 
+    pub fn profile(&self) -> Option<&StoredProfile> {
+        self.data.profile.as_ref()
+    }
+
+    pub fn has_restorable_session(&self) -> bool {
+        self.refresh_token().is_some()
+    }
+
     pub fn ensure_device_id(&mut self) -> String {
         if self.data.device_id.is_empty() {
             self.data.device_id = format!("{:032x}", rand::random::<u128>());
@@ -52,6 +69,21 @@ impl SessionStore {
         self.data.refresh_token = Some(token.to_string());
         if let Err(error) = self.save() {
             eprintln!("failed to persist Spotify refresh token: {error}");
+        }
+    }
+
+    pub fn clear_refresh_token(&mut self) {
+        self.data.refresh_token = None;
+        self.data.profile = None;
+        if let Err(error) = self.save() {
+            eprintln!("failed to clear Spotify refresh token: {error}");
+        }
+    }
+
+    pub fn set_profile(&mut self, profile: StoredProfile) {
+        self.data.profile = Some(profile);
+        if let Err(error) = self.save() {
+            eprintln!("failed to persist Spotify profile: {error}");
         }
     }
 
@@ -83,6 +115,31 @@ fn state_file_path() -> PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir());
 
     cache.join("rspotify").join("session.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_profile_round_trips_and_legacy_session_remains_readable() {
+        let session = StoredSession {
+            device_id: "device-id".into(),
+            refresh_token: Some("refresh-token".into()),
+            profile: Some(StoredProfile {
+                name: "Listener".into(),
+                image_url: Some("https://images.example/avatar".into()),
+            }),
+        };
+        let encoded = serde_json::to_string(&session).unwrap();
+        let decoded: StoredSession = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.profile, session.profile);
+
+        let legacy: StoredSession =
+            serde_json::from_str(r#"{"device_id":"old-device","refresh_token":"old-token"}"#)
+                .unwrap();
+        assert!(legacy.profile.is_none());
+    }
 }
 
 #[cfg(unix)]

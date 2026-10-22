@@ -6,6 +6,7 @@ use gpui::{
 };
 
 use crate::hooks::use_spotify;
+use crate::lib::spotify::UserProfile;
 
 const AVATAR_SIZE: f32 = 47.0;
 const AVATAR_BG_COLOR: u32 = 0x1f1f1f;
@@ -33,10 +34,19 @@ pub struct UserAvatar {
 }
 
 impl UserAvatar {
-    pub fn new() -> Self {
+    pub fn new(profile: Option<UserProfile>) -> Self {
         UserAvatar {
-            avatar: UserAvatarState::Loading,
+            avatar: profile
+                .and_then(|profile| profile.image_url)
+                .map(|url| UserAvatarState::Loaded(url.into()))
+                .unwrap_or(UserAvatarState::Loading),
             hover_state: HoverState::Idle,
+        }
+    }
+
+    pub fn set_profile(&mut self, profile: Option<UserProfile>) {
+        if let Some(url) = profile.and_then(|profile| profile.image_url) {
+            self.avatar = UserAvatarState::Loaded(url.into());
         }
     }
 
