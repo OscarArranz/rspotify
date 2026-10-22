@@ -54,6 +54,15 @@
 
 ## Follow-ups
 
+### Automatic track transition metadata fix
+
+- [x] Trace stale now-playing metadata to Connect polling overwriting local player events.
+- [x] Keep local player metadata/timing authoritative and reject stale in-flight remote hydration.
+- [x] Add headless regression tests for local transitions and remote hydration guards.
+- [x] Run `cargo fmt --check`, `cargo check`, and `cargo test`.
+  All pass: 22 tests passed, 3 account/audio tests ignored. Existing compiler warnings remain.
+- [ ] Real-account automatic transition/visual check (requires user-approved network/account access).
+
 ### Linux development icon fix
 
 - [x] Inspect live KWin identity: `resourceClass=rspotify`, `desktopFileName=rspotify`.

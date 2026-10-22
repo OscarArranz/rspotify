@@ -129,6 +129,11 @@ Each event records `updated_at`. `NativeSpotify::playback` clones the snapshot a
 position by the elapsed time while playing, clamped to the track duration. This keeps the progress
 bar smooth without querying Spotify.
 
+The Connect poller hydrates remote-device metadata only. When the active device is rspotify, local
+player events own metadata and timing; the server snapshot can lag automatic track transitions.
+After asynchronous metadata hydration, recheck both the current server track URI and active device
+before applying the result, so an in-flight remote fetch cannot overwrite resumed local playback.
+
 `PlayerBar` polls the snapshot from a background timer and re-renders only on changes. It sends
 play/pause, previous/next, seek, and volume commands directly to `NativeSpotify`.
 
