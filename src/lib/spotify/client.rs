@@ -782,6 +782,13 @@ fn spawn_connect_state_event_loop(
                 continue;
             };
 
+            // Server state can lag local automatic track changes. Local player events own
+            // metadata and the position clock while this device is active.
+            if remote.active_device_id == session.device_id() {
+                resolved_uri.clear();
+                continue;
+            }
+
             if remote.track_uri.is_empty() {
                 if remote.active_device_id != session.device_id() {
                     let mut inner = playback.lock().unwrap();
@@ -814,17 +821,25 @@ fn spawn_connect_state_event_loop(
                     let mut inner = playback.lock().unwrap();
                     // A newer server update or local player event may have arrived while
                     // metadata was being fetched; only apply a still-current server item.
-                    if spirc
-                        .remote_player_state()
-                        .is_some_and(|latest| latest.track_uri == remote.track_uri)
-                    {
-                        inner.snapshot.now_playing = Some(now_playing);
-                        inner.snapshot.context_uri =
-                            (!remote.context_uri.is_empty()).then_some(remote.context_uri.clone());
+                    if let Some(latest) = spirc.remote_player_state() {
+                        apply_remote_now_playing(
+                            &mut inner,
+                            &latest,
+                            session.device_id(),
+                            now_playing,
+                        );
                     }
                 }
             }
 
+            // Refresh after the possible await above before updating remote timing/context.
+            let Some(remote) = spirc.remote_player_state() else {
+                continue;
+            };
+            if remote.active_device_id == session.device_id() {
+                resolved_uri.clear();
+                continue;
+            }
             let mut inner = playback.lock().unwrap();
             if inner
                 .snapshot
@@ -832,11 +847,8 @@ fn spawn_connect_state_event_loop(
                 .as_ref()
                 .is_some_and(|track| track.uri == remote.track_uri)
             {
-                let is_local_device = remote.active_device_id == session.device_id();
-                if !is_local_device {
-                    inner.snapshot.is_playing = false;
-                    inner.snapshot.position_ms = remote.position_ms;
-                }
+                inner.snapshot.is_playing = false;
+                inner.snapshot.position_ms = remote.position_ms;
                 if !remote.context_uri.is_empty() {
                     inner.snapshot.context_uri = Some(remote.context_uri);
                 }
@@ -844,6 +856,21 @@ fn spawn_connect_state_event_loop(
             }
         }
     });
+}
+
+fn apply_remote_now_playing(
+    inner: &mut PlaybackInner,
+    remote: &librespot::connect::RemotePlayerState,
+    local_device_id: &str,
+    now_playing: NowPlaying,
+) {
+    // Hydration may finish after the server changes tracks or playback returns locally.
+    if remote.active_device_id == local_device_id || remote.track_uri != now_playing.uri {
+        return;
+    }
+    inner.snapshot.now_playing = Some(now_playing);
+    inner.snapshot.context_uri =
+        (!remote.context_uri.is_empty()).then_some(remote.context_uri.clone());
 }
 
 fn now_playing_from_remote(
@@ -1012,6 +1039,75 @@ fn restrict_private_dir(_path: &std::path::Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_connect_metadata_cannot_replace_the_next_local_song() {
+        let next_song = NowPlaying {
+            uri: "spotify:track:next".into(),
+            title: "Next song".into(),
+            ..Default::default()
+        };
+        let snapshot = PlaybackSnapshot {
+            now_playing: Some(next_song),
+            is_playing: true,
+            position_ms: 250,
+            context_uri: Some("spotify:playlist:local".into()),
+            ..Default::default()
+        };
+        let mut inner = PlaybackInner {
+            snapshot: snapshot.clone(),
+            updated_at: Instant::now(),
+        };
+        let updated_at = inner.updated_at;
+        let remote = librespot::connect::RemotePlayerState {
+            active_device_id: "rspotify-device".into(),
+            track_uri: "spotify:track:finished".into(),
+            ..Default::default()
+        };
+        let finished_song = NowPlaying {
+            uri: remote.track_uri.clone(),
+            title: "Finished song".into(),
+            ..Default::default()
+        };
+
+        // Also covers hydration started remotely but completed after local activation.
+        apply_remote_now_playing(&mut inner, &remote, "rspotify-device", finished_song);
+
+        assert_eq!(inner.snapshot, snapshot);
+        assert_eq!(inner.updated_at, updated_at);
+    }
+
+    #[test]
+    fn remote_hydration_applies_only_to_the_current_remote_song() {
+        let mut inner = PlaybackInner {
+            snapshot: PlaybackSnapshot::default(),
+            updated_at: Instant::now(),
+        };
+        let remote = librespot::connect::RemotePlayerState {
+            active_device_id: "other-device".into(),
+            track_uri: "spotify:track:current".into(),
+            context_uri: "spotify:playlist:remote".into(),
+            ..Default::default()
+        };
+        let stale_song = NowPlaying {
+            uri: "spotify:track:previous".into(),
+            ..Default::default()
+        };
+        apply_remote_now_playing(&mut inner, &remote, "rspotify-device", stale_song);
+        assert_eq!(inner.snapshot, PlaybackSnapshot::default());
+
+        let current_song = NowPlaying {
+            uri: remote.track_uri.clone(),
+            title: "Current remote song".into(),
+            ..Default::default()
+        };
+        apply_remote_now_playing(&mut inner, &remote, "rspotify-device", current_song.clone());
+        assert_eq!(inner.snapshot.now_playing, Some(current_song));
+        assert_eq!(
+            inner.snapshot.context_uri.as_deref(),
+            Some(remote.context_uri.as_str())
+        );
+    }
 
     #[test]
     fn builds_track_display_from_connect_server_metadata() {

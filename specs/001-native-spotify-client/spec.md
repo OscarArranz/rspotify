@@ -83,6 +83,8 @@ the user's library, and play audio locally through a Spotify Connect device.
   artists, shows, and Liked Songs.
 - Keep a shared playback snapshot updated from librespot player events. Extrapolate the position
   while playing and poll it from the player bar without blocking on the player event channel.
+- When a song ends and the next starts, show the new song's metadata. Local player events are
+  authoritative while rspotify is active; stale Connect server state must not restore the old song.
 - Support play/pause, previous/next, seek, and volume changes. Playback requires Premium; do not
   bypass DRM.
 - Use the bundled SVG media icons rather than relying on font glyphs.
