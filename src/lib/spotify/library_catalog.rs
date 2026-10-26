@@ -233,7 +233,10 @@ async fn hydrate_batch(session: &Session, entries: &mut [LibraryEntry]) -> bool 
             }
         }
     }
-    let complete = entries.iter().all(|e| decoded.contains_key(&e.uri));
+    // A batch can legitimately omit region-restricted or deleted items. Only treat a batch as
+    // failed when the service returned nothing usable for it, otherwise the panel would report a
+    // metadata error for a single unavailable album.
+    let decoded_any = !decoded.is_empty();
     for entry in entries {
         if let Some((name, owner, cover, label)) = decoded.remove(&entry.uri) {
             entry.name = name;
@@ -242,7 +245,7 @@ async fn hydrate_batch(session: &Session, entries: &mut [LibraryEntry]) -> bool 
             entry.type_label = label;
         }
     }
-    complete
+    decoded_any
 }
 
 fn image(group: &metadata::ImageGroup) -> Option<String> {

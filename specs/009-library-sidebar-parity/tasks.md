@@ -64,9 +64,10 @@ visual acceptance remain incomplete. Full 1:1 parity must not be claimed.
 ## Main integration (2026-10-26)
 
 - [x] Restore the normal-view toolbar to the reference layout: the row now fills the virtualized
-  list width, the search field is always visible with its "Search in Your Library" placeholder and
-  clear affordance, and the view/sort picker is right-aligned (icon-only in normal, labeled in
-  expanded).
+  list width, so the picker sits at the trailing edge. The resting state is the compact search
+  button plus the active sort label and view glyph; opening search shows the focused field with
+  its "Search in Your Library" placeholder and clear affordance, and hides the sort label.
+  An empty search collapses on blur and Escape clears it.
 - [x] Show the library heading glyph at rest and swap it for the collapse glyph on hover, matching
   the reference header.
 - [x] Fade overflowing category chips into a solid panel-colored backdrop beneath the overflow

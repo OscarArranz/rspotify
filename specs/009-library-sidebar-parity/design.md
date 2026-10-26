@@ -40,9 +40,12 @@ calls to shared modules; request contracts and runtime availability remain separ
 - Toolbar geometry: the search field and view/sort picker live in the first virtualized list row so
   they scroll away with the rows. That row must declare `w_full()` explicitly; a list row is laid
   out at its intrinsic width otherwise, which collapses `flex_1` children and strands the picker
-  next to the search button instead of the panel edge. The search field is always rendered in the
-  normal and expanded layouts with its state placeholder, and the picker is icon-only until the
-  expanded layout shows the active sort label.
+  next to the search button instead of the panel edge.
+- Toolbar states: the resting normal layout shows the compact search button at the leading edge and
+  the active sort label plus the current view glyph at the trailing edge. Opening search focuses the
+  full field (magnifier, placeholder, clear affordance) up to 300 px wide and hides the sort label;
+  the expanded layout keeps the label beside the field. An empty search collapses again on blur,
+  and Escape clears and collapses it.
 - Chip overflow controls paint a solid panel-colored backdrop plus a gradient under the arrow, so a
   clipped chip fades into the panel instead of showing cut text beside the button.
 - Router: retains source identity alongside history so selection follows back/forward navigation.

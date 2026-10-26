@@ -398,6 +398,7 @@ impl LibrarySidebar {
 
     pub(super) fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let expanded = self.size == LibrarySize::Expanded;
+        let search_open = self.search_open || expanded;
         let weak = cx.entity().downgrade();
         div()
             // This row is also a virtualized list row, so without an explicit width the search
@@ -410,33 +411,47 @@ impl LibrarySidebar {
             .justify_between()
             .gap(px(8.0))
             .flex_shrink_0()
-            .child(
-                div()
-                    .id("library-search-field")
-                    .h(px(32.0))
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .max_w(px(300.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .pl(px(12.0))
-                    .pr(px(6.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(0x2a2a2a))
-                    .child(icon("icons/search.svg", 16.0, MUTED))
-                    .child(
-                        Input::new(&self.search)
-                            .appearance(false)
-                            .bordered(false)
-                            .focus_bordered(false)
-                            .cleanable(true)
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_size(px(14.0))
-                            .text_color(rgb(0xffffff)),
-                    ),
-            )
+            .when(!search_open, |d| {
+                d.child(
+                    Button::new("library-search")
+                        .ghost()
+                        .flex_shrink_0()
+                        .size(px(32.0))
+                        .rounded_full()
+                        .child(icon("icons/search.svg", 16.0, MUTED))
+                        .tooltip("Search in Your Library")
+                        .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
+                )
+            })
+            .when(search_open, |d| {
+                d.child(
+                    div()
+                        .id("library-search-field")
+                        .h(px(32.0))
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .max_w(px(300.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .pl(px(12.0))
+                        .pr(px(6.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(0x2a2a2a))
+                        .child(icon("icons/search.svg", 16.0, MUTED))
+                        .child(
+                            Input::new(&self.search)
+                                .appearance(false)
+                                .bordered(false)
+                                .focus_bordered(false)
+                                .cleanable(true)
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .text_size(px(14.0))
+                                .text_color(rgb(0xffffff)),
+                        ),
+                )
+            })
             .child(
                 Popover::new("library-sort-popup")
                     .appearance(false)
@@ -449,7 +464,7 @@ impl LibrarySidebar {
                             .h(px(32.0))
                             .text_color(rgb(MUTED))
                             .text_size(px(14.0))
-                            .when(expanded, |b| b.label(self.sort.label()))
+                            .when(!search_open || expanded, |b| b.label(self.sort.label()))
                             .child(icon(self.view.icon(), 16.0, MUTED))
                             .tooltip("Sort by and view as"),
                     )
