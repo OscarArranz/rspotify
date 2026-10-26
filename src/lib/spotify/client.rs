@@ -1498,6 +1498,35 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires network and a user-approved native account session"]
+    fn smoke_native_library_diagnostics() {
+        use super::super::library::LibraryHydrator;
+        assert!(
+            SessionStore::load().refresh_token().is_some(),
+            "Authorize rspotify before running this check"
+        );
+        let client = NativeSpotify::restore().expect("native session restore");
+        let entries = client.library_entries().expect("native library rootlist");
+        eprintln!("diagnostics: rootlist entries={}", entries.len());
+        let catalog = client.library_catalog();
+        eprintln!(
+            "diagnostics: catalog failures={} recents_available={} categories={} pins={}",
+            catalog.failures,
+            catalog.recents_available,
+            catalog.loaded_categories.len(),
+            catalog.pins.as_ref().map(|p| p.len()).unwrap_or(0)
+        );
+        let mut cache = LibraryHydrator::default();
+        let mut failures = 0;
+        for entry in entries {
+            let mut batch = [entry];
+            failures += client.hydrate_library_entries(&mut batch, &mut cache);
+        }
+        eprintln!("diagnostics: per-entry hydrate failures={failures}");
+        // Read-only: no playback, pin, or library mutation is issued.
+    }
+
+    #[test]
     fn builds_track_display_from_connect_server_metadata() {
         let remote = librespot::connect::RemotePlayerState {
             track_uri: "spotify:track:example".into(),

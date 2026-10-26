@@ -54,7 +54,11 @@ pub(crate) async fn fetch(session: &Session) -> LibrarySupplement {
         collection::snapshot(session, "ylpin"),
         fetch_recents(session),
     );
+    let mut failed_sources: Vec<&'static str> = Vec::new();
     let recents_available = recents.is_ok();
+    if !recents_available {
+        failed_sources.push("recents");
+    }
     let recents = recents.unwrap_or_default();
     let mut result = LibrarySupplement {
         entries: Vec::new(),
@@ -101,7 +105,10 @@ pub(crate) async fn fetch(session: &Session) -> LibrarySupplement {
                     });
                 }
             }
-            Err(_) => result.failures += 1,
+            Err(_) => {
+                result.failures += 1;
+                failed_sources.push(kind.label());
+            }
         }
     }
     match pins {
@@ -113,7 +120,10 @@ pub(crate) async fn fetch(session: &Session) -> LibrarySupplement {
                     .collect(),
             )
         }
-        Err(_) => result.failures += 1,
+        Err(_) => {
+            result.failures += 1;
+            failed_sources.push("pins");
+        }
     }
     result.entries.sort_by(|a, b| {
         b.last_played_at
@@ -123,9 +133,21 @@ pub(crate) async fn fetch(session: &Session) -> LibrarySupplement {
     for chunk in result.entries.chunks_mut(64) {
         if !hydrate_batch(session, chunk).await {
             result.failures += 1;
+            failed_sources.push("decoration");
         }
     }
+    if diagnostic_logging() && result.failures > 0 {
+        eprintln!(
+            "library catalog: failures={} sources={failed_sources:?}",
+            result.failures
+        );
+    }
     result
+}
+
+/// Opt-in failure-source logging. Emits counts and source names only, never titles or URIs.
+pub(crate) fn diagnostic_logging() -> bool {
+    std::env::var_os("RSPOTIFY_LIBRARY_DIAGNOSTICS").is_some()
 }
 
 async fn hydrate_batch(session: &Session, entries: &mut [LibraryEntry]) -> bool {

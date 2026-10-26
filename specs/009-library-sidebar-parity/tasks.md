@@ -72,6 +72,9 @@ visual acceptance remain incomplete. Full 1:1 parity must not be claimed.
   the reference header.
 - [x] Fade overflowing category chips into a solid panel-colored backdrop beneath the overflow
   arrows instead of leaving hard-clipped labels.
+- [x] Diagnose the metadata banner: catalog paging, recents, pins and decoration were healthy; one
+  playlist returns 403 from `get_playlist`, and a single item-level miss was promoted to the global
+  banner. Item-level misses now keep the rootlist fallback instead of raising it.
 - [ ] User re-check of the normal-view toolbar at matched scale.
 
 - [x] Merge origin/main without discarding the pending library work or existing untracked `qq`.

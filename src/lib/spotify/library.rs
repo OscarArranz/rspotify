@@ -392,7 +392,9 @@ pub(crate) async fn hydrate(
     cache: &mut LibraryHydrator,
 ) -> usize {
     let mut failures = 0;
-    for entry in entries {
+    let mut cover_failures = 0;
+    let mut profile_failures = 0;
+    for entry in entries.iter_mut() {
         if !matches!(entry.kind, LibraryKind::Playlist | LibraryKind::LikedSongs) {
             continue;
         }
@@ -406,6 +408,27 @@ pub(crate) async fn hydrate(
                 tokio::time::timeout(Duration::from_secs(15), hydrate_cover(session, entry)).await;
             if !matches!(result, Ok(Ok(()))) {
                 failures += 1;
+                cover_failures += 1;
+                if super::library_catalog::diagnostic_logging() {
+                    // Class only: never print the playlist identity or the response body.
+                    match &result {
+                        Err(_) => eprintln!("library hydrate: cover timeout"),
+                        Ok(Err(error)) => {
+                            let text = error.to_string();
+                            let class = if text.contains("404") {
+                                "not-found"
+                            } else if text.contains("403") {
+                                "forbidden"
+                            } else if text.contains("429") {
+                                "rate-limited"
+                            } else {
+                                "api"
+                            };
+                            eprintln!("library hydrate: cover failure class={class}");
+                        }
+                        Ok(Ok(())) => {}
+                    }
+                }
             }
         }
         if !entry.owner.is_empty() {
@@ -433,10 +456,17 @@ pub(crate) async fn hydrate(
                 }
                 if !resolved {
                     failures += 1;
+                    profile_failures += 1;
                 }
                 cache.profiles.insert(username, entry.owner.clone());
             }
         }
+    }
+    if failures > 0 && super::library_catalog::diagnostic_logging() {
+        eprintln!(
+            "library hydrate: entries={} failures={failures} (cover={cover_failures} profile={profile_failures})",
+            entries.len()
+        );
     }
     failures
 }

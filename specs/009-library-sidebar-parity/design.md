@@ -48,10 +48,15 @@ calls to shared modules; request contracts and runtime availability remain separ
   and Escape clears and collapses it.
 - Chip overflow controls paint a solid panel-colored backdrop plus a gradient under the arrow, so a
   clipped chip fades into the panel instead of showing cut text beside the button.
+- Failure policy: item-level hydration misses (403/404/timeout for one playlist's cover or owner)
+  keep the rootlist name, owner and `meta_items` artwork and must not raise a panel-wide error.
+  Only catalog-level failures (collection sets, pins, recents, decoration batches) show the retry
+  banner. `RSPOTIFY_LIBRARY_DIAGNOSTICS=1` emits failure counts and classes without titles or URIs.
 - Router: retains source identity alongside history so selection follows back/forward navigation.
 
 All network and hydration work stays on workers. Results return via oneshot/mpsc; refreshes use
-generation guards. Metadata failures leave usable rows visible with an explicit partial-data warning.
+generation guards. Item-level metadata misses leave the row usable with its rootlist fallback, and
+catalog-level failures add an explicit partial-data warning.
 No credentials, account identifiers or library titles are added to checked-in fixtures or diagnostic logs.
 
 ## Presentation

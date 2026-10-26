@@ -233,6 +233,18 @@ rspotify's explicit Pin/Unpin action writes a single ylpin membership and verifi
 reads before changing the UI. It does not report optimistic success. Account-write validation was
 **not performed**; offline tests cover serialization, including remove/timestamp/update-ID fields.
 
+#### Per-item metadata failures are not service failures
+
+Diagnostic run (`smoke_native_library_diagnostics`, counts only, no titles or URIs) on the test
+account: 111 rootlist entries, catalog paging/recents/pins/decoration all healthy (`failures=0`),
+and exactly **one** playlist returned `403 Forbidden` from `get_playlist` during cover hydration.
+The row keeps its rootlist name, owner and any `meta_items` artwork; only the extra cover refresh is
+unavailable. The panel previously promoted that single item-level miss into the global "Some library
+metadata could not be loaded" banner. Item-level hydration misses (403/404/timeout) are now absorbed
+by the row's rootlist fallback, while catalog-level failures (paging sets, pins, recents, decoration
+batches) still raise the banner. Set `RSPOTIFY_LIBRARY_DIAGNOSTICS=1` to print counts and failure
+classes without account data.
+
 Rootlist mutation routing was partially recovered as POST
 `/playlist/v2/user/<username>/rootlist/changes` at `0x2bde2c0`, but its complete body/revision contract
 and playlist creation contract remain unresolved. Creation and other editing stay disabled.

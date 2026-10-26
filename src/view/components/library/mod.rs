@@ -339,7 +339,7 @@ impl LibrarySidebar {
                                     }
                                 }
                             }
-                            LibraryUpdate::Hydrated(entries, failures) => {
+                            LibraryUpdate::Hydrated(entries, _failures) => {
                                 for entry in entries {
                                     if let Some(old) =
                                         this.entries.iter_mut().find(|e| e.uri == entry.uri)
@@ -349,7 +349,10 @@ impl LibrarySidebar {
                                         old.pinned = pinned;
                                     }
                                 }
-                                this.metadata_failures += failures;
+                                // Per-item hydration misses (for example a playlist whose
+                                // metadata is 403/404 for this account) keep the rootlist name and
+                                // owner, so they are not a panel-wide failure. Only catalog-level
+                                // failures raise the retry banner.
                                 let visible = this.filtered();
                                 if visible != this.visible {
                                     this.visible = visible;
