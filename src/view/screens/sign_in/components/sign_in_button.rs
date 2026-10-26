@@ -89,11 +89,19 @@ impl RenderOnce for SignInButton {
                             let router = router_handle.clone();
                             let window_handle = window_handle.clone();
                             let async_state = state.clone();
-                            let (tx, rx) = oneshot::channel::<Result<NativeSpotify, String>>();
+                            let (tx, rx) = oneshot::channel::<
+                                Result<
+                                    (NativeSpotify, Option<crate::lib::spotify::UserProfile>),
+                                    String,
+                                >,
+                            >();
 
                             // Run authentication in a background thread (blocking I/O)
                             std::thread::spawn(move || {
-                                let result = SignInButton::do_authenticate();
+                                let result = SignInButton::do_authenticate().map(|client| {
+                                    let profile = client.persist_profile();
+                                    (client, profile)
+                                });
                                 let _ = tx.send(result);
                             });
 
@@ -102,11 +110,14 @@ impl RenderOnce for SignInButton {
                                 let result = rx.await;
 
                                 match result {
-                                    Ok(Ok(spotify_client)) => {
+                                    Ok(Ok((spotify_client, profile))) => {
                                         // Store the authenticated client in global app state
                                         cx.update(|cx| {
                                             cx.update_global::<AppState, _>(|state, _cx| {
                                                 state.set_spotify_client(spotify_client);
+                                                if let Some(profile) = profile {
+                                                    state.set_profile(profile);
+                                                }
                                             });
                                         })
                                         .ok();

@@ -7,9 +7,11 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 - **Native login**: OAuth against `accounts.spotify.com` using Spotify's desktop client id, then a native session over `login5.spotify.com` via librespot.
 - **Native search**: persisted GraphQL queries against Spotify's Pathfinder endpoint (`api-partner.spotify.com/pathfinder/v1/query`), the same service the official desktop and web clients use.
 - **Local playback**: registers as a Spotify Connect device (`rspotify`) and streams through librespot to the default audio output.
-- **Persistent session**: the refresh token and a stable device id are stored in `~/.cache/rspotify/` so the browser login is only needed once.
+- **Persistent session**: the refresh token, stable device id, and cached profile details are stored in `~/.cache/rspotify/`. Returning users see the app immediately while the session refreshes in the background; the browser login is only needed once.
 - **Playlist detail**: saved playlists and Liked Songs open in a Spotify-style page with a large header, virtualized track list, local search, sort, and context playback.
 - **Spotify-style UI**: custom titlebar, library sidebar, tabbed search results, playlist pages and a now-playing bar, built with GPUI.
+- **Smooth scrolling**: shared easing for wheel and touchpad input in the library, search results,
+  horizontal carousels, and virtualized playlists.
 
 > **Spotify Premium is required for playback.** Free accounts can sign in and search, but Spotify does not permit playback through this kind of client.
 
@@ -48,11 +50,31 @@ sudo apt install libasound2-dev
 cargo run --release
 ```
 
+Use the release build when evaluating UI responsiveness; the default `cargo run` uses unoptimized
+application and dependency code. For optional scroll frame-callback timing summaries, run
+`RSPOTIFY_SCROLL_METRICS=1 cargo run --release`. These report aggregate timing only, not account data.
+
 Then press **Log in with Spotify**. A browser window opens at Spotify's login page; after
 authorising, the loopback callback returns to the app automatically.
 
 No Spotify Developer app is required. The client uses the same public desktop client id as
 the official client and librespot.
+
+### Linux desktop icon during development
+
+After building, register the project-owned icon and development launcher once:
+
+```sh
+cargo build
+scripts/install-dev-desktop-entry.sh
+cargo run
+```
+
+This installs `rspotify.desktop` and the bundled SVG under `${XDG_DATA_HOME:-~/.local/share}`.
+It uses the built executable's absolute path and refreshes KDE's service and icon-loader caches.
+Spotify's Flatpak is not required. Rerun setup if you move the checkout; pass an executable path
+as the first argument for release builds or a custom Cargo target directory. The installer uses
+Python 3 to escape paths in the desktop entry. It does not launch the app or access your account.
 
 ### Configuration
 
@@ -69,8 +91,9 @@ RSPOTIFY_REDIRECT_URI=http://127.0.0.1:8898/login
 RSPOTIFY_STATE_DIR=/home/you/.cache/rspotify
 ```
 
-`~/.cache/rspotify/session.json` is written with owner-only permissions and contains the
-OAuth refresh token. Delete it to sign out.
+`~/.cache/rspotify/session.json` is written with owner-only permissions and contains the OAuth
+refresh token, stable device id, and cached display name/avatar URL. It does not contain an access
+token or account password. Delete it to sign out.
 
 ## Architecture
 
@@ -109,8 +132,10 @@ the agent workflow, native-client constraints, validation commands, and security
 
 ## How it works
 
-1. The app opens Spotify's OAuth page with the desktop client id and a loopback redirect.
-2. The refresh token is exchanged for an access token and cached.
+1. On first sign-in, the app opens Spotify's OAuth page with the desktop client id and a loopback
+   redirect. Returning users see their cached profile immediately while the refresh token is
+   exchanged for an access token in the background.
+2. The refresh token, stable device id, and latest non-secret profile details are cached.
 3. librespot connects to Spotify using the native access-token flow (login5, keymaster,
    AP resolver), and registers a Connect device named `rspotify`.
 4. Search is sent to Pathfinder with query hashes extracted from the installed official

@@ -8,6 +8,9 @@ pub enum SpotifyError {
     #[error("Authentication error: {0}")]
     Auth(String),
 
+    #[error("Stored Spotify credentials were rejected")]
+    InvalidRefreshToken,
+
     #[error("Session error: {0}")]
     Session(String),
 

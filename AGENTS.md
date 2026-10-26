@@ -5,6 +5,14 @@ These instructions apply to all coding agents and contributors working in this r
 ## Project
 
 - rspotify is a Rust + GPUI desktop Spotify client.
+- Spotify desktop is installed as a Flatpak on the development machine. The original icon was
+  sourced from its `com.spotify.Client` Flatpak, but rspotify must bundle and use its own copy;
+  never depend on the Flatpak remaining installed. Keep `WindowOptions.app_id`, the Linux desktop
+  entry ID, and the bundled icon name aligned as `rspotify` so it remains distinct from Spotify.
+  For Linux `cargo run` icon testing, run `scripts/install-dev-desktop-entry.sh` to register the
+  project-owned desktop entry and icon in the user's XDG data directories. Build first; the script
+  accepts an optional executable path for release/custom target directories. On KDE, refresh both
+  service metadata and the icon loader; `kbuildsycoca6` alone does not invalidate panel icon caches.
 - It uses Spotify's native desktop services, not the public Web API: OAuth with Spotify's desktop
   client id, librespot login5/Spotify Connect, Pathfinder GraphQL, and the SpClient rootlist.
 - Playback requires **Spotify Premium**. Keep that statement in the README and in user-facing text.
@@ -46,8 +54,9 @@ applicable. Treat `specs/` as the source of truth for intended behavior.
 
 ## Native client constraints
 
-- **Login:** use Spotify's desktop OAuth client id and loopback redirect. Persist only the refresh
-  token and a stable device id; never persist the account password.
+- **Login:** use Spotify's desktop OAuth client id and loopback redirect. Persist the refresh token,
+  stable device id, and cached non-secret display name/avatar URL for optimistic startup UI; never
+  persist the account password or access token.
 - **Session:** use librespot's login5 session. Do not call the public Web API for search, library,
   or playback.
 - **Search:** use the Pathfinder `searchDesktop` persisted query. Get the bearer token from
