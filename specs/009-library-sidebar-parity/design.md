@@ -37,6 +37,14 @@ calls to shared modules; request contracts and runtime availability remain separ
   without recreating its inputs or losing its size-event subscription.
 - Library scrolling and horizontal chips reuse spec 007/008's owner-scoped smoothing; list resets
   cancel in-flight motion and preserve the shared scroll helper's click/input behavior.
+- Toolbar geometry: the search field and view/sort picker live in the first virtualized list row so
+  they scroll away with the rows. That row must declare `w_full()` explicitly; a list row is laid
+  out at its intrinsic width otherwise, which collapses `flex_1` children and strands the picker
+  next to the search button instead of the panel edge. The search field is always rendered in the
+  normal and expanded layouts with its state placeholder, and the picker is icon-only until the
+  expanded layout shows the active sort label.
+- Chip overflow controls paint a solid panel-colored backdrop plus a gradient under the arrow, so a
+  clipped chip fades into the panel instead of showing cut text beside the button.
 - Router: retains source identity alongside history so selection follows back/forward navigation.
 
 All network and hydration work stays on workers. Results return via oneshot/mpsc; refreshes use

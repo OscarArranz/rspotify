@@ -75,7 +75,6 @@ pub(crate) struct LibrarySidebar {
     folder: Option<String>,
     query: String,
     search: Entity<InputState>,
-    search_open: bool,
     size: LibrarySize,
     last_open_size: LibrarySize,
     width: f32,
@@ -100,15 +99,11 @@ impl LibrarySidebar {
     pub fn new(client: Option<NativeSpotify>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search in Your Library"));
         let subscription = cx.subscribe(&search, |this, input, event: &InputEvent, cx| {
-            match event {
-                InputEvent::Change => {
-                    this.query = input.read(cx).value().to_string();
-                    this.rebuild();
-                }
-                InputEvent::Blur if this.query.is_empty() => this.search_open = false,
-                _ => return,
+            if let InputEvent::Change = event {
+                this.query = input.read(cx).value().to_string();
+                this.rebuild();
+                cx.notify();
             }
-            cx.notify();
         });
         let mut subscriptions = vec![subscription];
         if let Some(router) = cx.try_global::<StackRouterHandle>() {
@@ -142,7 +137,6 @@ impl LibrarySidebar {
             folder: None,
             query: String::new(),
             search,
-            search_open: false,
             size: LibrarySize::Normal,
             last_open_size: LibrarySize::Normal,
             width: 308.0,
@@ -453,14 +447,7 @@ impl LibrarySidebar {
         cx.notify();
     }
 
-    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_open = true;
-        self.search.update(cx, |input, cx| input.focus(window, cx));
-        cx.notify();
-    }
-
-    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_open = false;
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.query.clear();
         self.search
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -876,8 +863,8 @@ impl Render for LibrarySidebar {
             .overflow_hidden()
             .text_color(rgb(0xffffff))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" && this.search_open {
-                    this.close_search(window, cx);
+                if event.keystroke.key == "escape" && !this.query.is_empty() {
+                    this.clear_search(window, cx);
                     cx.stop_propagation();
                     return;
                 }

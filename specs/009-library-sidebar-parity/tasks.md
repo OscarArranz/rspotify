@@ -63,6 +63,16 @@ visual acceptance remain incomplete. Full 1:1 parity must not be claimed.
 
 ## Main integration (2026-10-26)
 
+- [x] Restore the normal-view toolbar to the reference layout: the row now fills the virtualized
+  list width, the search field is always visible with its "Search in Your Library" placeholder and
+  clear affordance, and the view/sort picker is right-aligned (icon-only in normal, labeled in
+  expanded).
+- [x] Show the library heading glyph at rest and swap it for the collapse glyph on hover, matching
+  the reference header.
+- [x] Fade overflowing category chips into a solid panel-colored backdrop beneath the overflow
+  arrows instead of leaving hard-clipped labels.
+- [ ] User re-check of the normal-view toolbar at matched scale.
+
 - [x] Merge origin/main without discarding the pending library work or existing untracked `qq`.
 - [x] Renumber this pending spec from 006 to 009 because main already uses 006–008.
 - [x] Preserve main's playback-clock/track-transition fixes, optimistic authentication, sized
