@@ -15,8 +15,6 @@ use librespot::playback::{
     mixer::{Mixer, MixerConfig, softmixer::SoftMixer},
     player::{Player, PlayerEvent},
 };
-use librespot::protocol::playlist4_external::SelectedListContent;
-use protobuf::Message;
 use serde_json::Value;
 
 use super::error::SpotifyError;
@@ -391,6 +389,43 @@ impl NativeSpotify {
         &self.inner.username
     }
 
+    /// Blocking native library fetch; callers must run this on a worker.
+    pub fn library_entries(&self) -> Result<Vec<super::library::LibraryEntry>, SpotifyError> {
+        self.inner
+            .runtime
+            .block_on(super::library::fetch(&self.inner.session))
+    }
+
+    pub(crate) fn library_catalog(&self) -> super::library_catalog::LibrarySupplement {
+        self.inner
+            .runtime
+            .block_on(super::library_catalog::fetch(&self.inner.session))
+    }
+
+    /// Blocking account mutation; only explicit user Pin/Unpin actions may invoke this worker API.
+    pub(crate) fn set_library_pinned(
+        &self,
+        uri: &str,
+        pinned: bool,
+    ) -> Result<std::collections::HashSet<String>, SpotifyError> {
+        self.inner.runtime.block_on(super::collection::set_pinned(
+            &self.inner.session,
+            uri,
+            pinned,
+        ))
+    }
+
+    /// Enrich a small visible batch without holding up the first library render.
+    pub(crate) fn hydrate_library_entries(
+        &self,
+        entries: &mut [super::library::LibraryEntry],
+        cache: &mut super::library::LibraryHydrator,
+    ) -> usize {
+        self.inner
+            .runtime
+            .block_on(super::library::hydrate(&self.inner.session, entries, cache))
+    }
+
     /// Searches Spotify's own Pathfinder endpoint. Blocking; call from a worker thread.
     pub fn search(&self, query: &str) -> Result<SearchResults, SpotifyError> {
         self.inner
@@ -429,81 +464,17 @@ impl NativeSpotify {
     /// official client decodes). Playlist names and artwork come from the decorated
     /// `meta_items` that accompany each rootlist entry.
     pub fn library_playlists(&self) -> Result<Vec<LibraryPlaylist>, SpotifyError> {
-        self.inner.runtime.block_on(async {
-            let mut playlists = Vec::new();
-            let mut from = 0usize;
-            let page_size = 100usize;
-
-            loop {
-                let bytes = self
-                    .inner
-                    .session
-                    .spclient()
-                    .get_rootlist(from, Some(page_size))
-                    .await
-                    .map_err(|error| SpotifyError::Api(error.to_string()))?;
-                let list = SelectedListContent::parse_from_bytes(&bytes)
-                    .map_err(|error| SpotifyError::Api(error.to_string()))?;
-
-                let Some(contents) = list.contents.as_ref() else {
-                    break;
-                };
-                if contents.items.is_empty() {
-                    break;
-                }
-
-                for (index, item) in contents.items.iter().enumerate() {
-                    let uri = item.uri.clone().unwrap_or_default();
-                    if !uri.starts_with("spotify:playlist:") {
-                        continue;
-                    }
-                    let attributes = contents
-                        .meta_items
-                        .get(index)
-                        .and_then(|meta| meta.attributes.as_ref());
-                    let name = attributes
-                        .and_then(|attributes| attributes.name.clone())
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or_else(|| "Playlist".to_string());
-                    let image_url = attributes.and_then(|attributes| {
-                        let from_sizes = attributes
-                            .picture_size
-                            .iter()
-                            .filter(|size| size.url.as_deref().is_some_and(|url| !url.is_empty()))
-                            .max_by_key(|size| {
-                                size.target_name
-                                    .as_deref()
-                                    .unwrap_or("")
-                                    .parse::<u32>()
-                                    .unwrap_or(0)
-                            })
-                            .map(|size| image_url_from_id(size.url.as_deref().unwrap_or("")))
-                            .filter(|url| !url.is_empty());
-                        from_sizes.or_else(|| {
-                            attributes
-                                .picture
-                                .as_deref()
-                                .and_then(image_url_from_picture)
-                        })
-                    });
-
-                    playlists.push(LibraryPlaylist {
-                        uri,
-                        name,
-                        owner: String::new(),
-                        image_url,
-                    });
-                }
-
-                from += contents.items.len();
-                let total = list.length().max(0) as usize;
-                if from >= total {
-                    break;
-                }
-            }
-
-            Ok(playlists)
-        })
+        Ok(self
+            .library_entries()?
+            .into_iter()
+            .filter(|entry| entry.kind == super::library::LibraryKind::Playlist)
+            .map(|entry| LibraryPlaylist {
+                uri: entry.uri,
+                name: entry.name,
+                owner: entry.owner,
+                image_url: entry.image_url,
+            })
+            .collect())
     }
 
     /// Fetches a saved playlist, or the current user's Liked Songs, plus its first context page.
@@ -1015,18 +986,6 @@ fn image_url_from_id(id: &str) -> String {
     }
 }
 
-fn image_url_from_picture(bytes: &[u8]) -> Option<String> {
-    if bytes.len() != 20 {
-        return None;
-    }
-    let id = bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let url = image_url_from_id(&id);
-    (!url.is_empty()).then_some(url)
-}
-
 fn session_cache_dir() -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("RSPOTIFY_STATE_DIR") {
         return std::path::PathBuf::from(dir);
@@ -1341,6 +1300,201 @@ mod tests {
             inner.snapshot.context_uri.as_deref(),
             Some(remote.context_uri.as_str())
         );
+    }
+
+    #[test]
+    #[ignore = "requires read-only Spotify account/network approval"]
+    fn smoke_native_library_context_navigation() {
+        use super::super::library::LibraryKind;
+        let client = NativeSpotify::authenticate().expect("native login");
+        let catalog = client.library_catalog();
+        for kind in [LibraryKind::Album, LibraryKind::Artist, LibraryKind::Show] {
+            let Some(entry) = catalog.entries.iter().find(|entry| entry.kind == kind) else {
+                continue;
+            };
+            let detail = client
+                .playlist_detail(PlaylistSource::Context {
+                    uri: entry.uri.clone(),
+                    name: entry.name.clone(),
+                    owner: entry.owner.clone(),
+                    image_url: entry.image_url.clone(),
+                    kind: kind.label(),
+                })
+                .expect("native catalog context page");
+            assert_eq!(detail.context_uri, entry.uri);
+            assert_eq!(detail.name, entry.name);
+            assert!(detail.tracks.iter().all(|track| !track.uri.is_empty()));
+            eprintln!(
+                "native library {kind:?} context: {} loaded rows, has-next={}",
+                detail.tracks.len(),
+                detail.next_page_url.is_some()
+            );
+        }
+        // No playback or mutation commands are invoked.
+    }
+
+    #[test]
+    #[ignore = "requires read-only Spotify account/network approval"]
+    fn smoke_native_library_catalog() {
+        use super::super::library::LibraryKind;
+        let client = NativeSpotify::authenticate().expect("native login");
+        let mut entries = client.library_entries().expect("native rootlist");
+        let supplement = client.library_catalog();
+        assert_eq!(
+            supplement.failures, 0,
+            "native category/pin/decoration requests failed"
+        );
+        let (categories, _) = supplement.apply(&mut entries);
+        for kind in [LibraryKind::Album, LibraryKind::Artist, LibraryKind::Show] {
+            assert!(
+                categories.contains(&kind),
+                "category contract was not loaded"
+            );
+            let category: Vec<_> = entries.iter().filter(|e| e.kind == kind).collect();
+            assert!(
+                category
+                    .iter()
+                    .all(|e| !e.name.is_empty() && e.name != kind.label()),
+                "catalog names remained placeholders"
+            );
+            eprintln!(
+                "native library category {kind:?}: {} decorated entries",
+                category.len()
+            );
+        }
+        assert!(
+            entries.iter().all(|e| e.pinned.is_some()),
+            "pin membership was not loaded"
+        );
+        eprintln!("native library pin membership loaded successfully");
+        // Read-only: no playback, pin/unpin, creation or editing commands are sent.
+    }
+
+    #[test]
+    #[ignore = "requires read-only Spotify account/network approval"]
+    fn smoke_native_library_collection_contract() {
+        let client = NativeSpotify::authenticate().expect("native login");
+        for set in ["artist", "show", "ylpin", "collection", "prerelease"] {
+            let page = client
+                .inner
+                .runtime
+                .block_on(super::super::collection::page(
+                    &client.inner.session,
+                    set,
+                    "",
+                ))
+                .expect("native collection page");
+            let mut types = std::collections::BTreeMap::new();
+            let mut contexts = std::collections::BTreeMap::new();
+            for item in &page.items {
+                *types
+                    .entry(item.uri.split(':').nth(1).unwrap_or("unknown").to_string())
+                    .or_insert(0usize) += 1;
+                if let Some(context) = &item.context_uri {
+                    *contexts
+                        .entry(context.split(':').nth(1).unwrap_or("unknown").to_string())
+                        .or_insert(0usize) += 1;
+                }
+            }
+            eprintln!(
+                "native collection {set}: {} items, types={types:?}, context-types={contexts:?}, removed={}, has-next={}",
+                page.items.len(),
+                page.items.iter().filter(|i| i.removed).count(),
+                !page.next.is_empty()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires read-only Spotify account/network approval"]
+    fn smoke_native_library_recents_contract() {
+        let client = NativeSpotify::authenticate().expect("native login");
+        let response = client.inner.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(15), client.inner.session.spclient().request_as_json(
+                &reqwest::Method::GET,
+                "/recently-played/v3/recently-played?limit=50&filter=default,collection-new-episodes",
+                None, None,
+            )).await
+        });
+        let bytes = response
+            .expect("bounded recents request")
+            .expect("observed native recents endpoint");
+        let recents =
+            super::super::library::parse_recents(&bytes).expect("native recents protobuf");
+        assert!(!recents.is_empty(), "no native recents to validate");
+        assert!(
+            recents
+                .values()
+                .all(|timestamp| *timestamp > 100_000_000_000 && *timestamp < 10_000_000_000_000),
+            "native recency timestamps are not epoch milliseconds"
+        );
+        eprintln!(
+            "native recents protobuf: {} valid context/timestamp records",
+            recents.len()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an existing Spotify login and read-only network/account approval"]
+    fn smoke_native_library_sidebar() {
+        use super::super::library::{LibraryHydrator, LibraryKind};
+        assert!(
+            SessionStore::load().refresh_token().is_some(),
+            "Authorize rspotify before running this check"
+        );
+        let client = NativeSpotify::authenticate().expect("native login");
+        let entries = client.library_entries().expect("native library rootlist");
+        assert_eq!(
+            entries.first().map(|e| e.kind),
+            Some(LibraryKind::LikedSongs)
+        );
+        let identities: std::collections::HashSet<_> =
+            entries.iter().map(|e| e.uri.as_str()).collect();
+        assert_eq!(identities.len(), entries.len());
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !entry.name.is_empty() && !entry.uri.is_empty())
+        );
+        assert!(entries.iter().all(|entry| {
+            entry
+                .parent
+                .as_ref()
+                .is_none_or(|parent| identities.contains(parent.as_str()))
+        }));
+        let mut sample: Vec<_> = entries
+            .iter()
+            .filter(|e| e.kind != LibraryKind::Folder)
+            .take(4)
+            .cloned()
+            .collect();
+        let mut cache = LibraryHydrator::default();
+        let failures = client.hydrate_library_entries(&mut sample, &mut cache);
+        assert_eq!(
+            failures, 0,
+            "sampled native library metadata requests failed"
+        );
+        assert!(
+            sample.iter().all(|entry| !entry.owner.is_empty()),
+            "sampled playlist owners were not resolved"
+        );
+        let owners = sample.iter().filter(|e| !e.owner.is_empty()).count();
+        let covers = sample
+            .iter()
+            .filter(|e| e.image_url.is_some() || !e.covers.is_empty())
+            .count();
+        eprintln!(
+            "library sidebar: {} entries, {} folders; sample {} owners, {} covers, {} metadata failures",
+            entries.len(),
+            entries
+                .iter()
+                .filter(|e| e.kind == LibraryKind::Folder)
+                .count(),
+            owners,
+            covers,
+            failures
+        );
+        // No playback or mutation commands are sent by this test.
     }
 
     #[test]

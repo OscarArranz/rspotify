@@ -132,3 +132,6 @@ The playback test starts audio. Pause or stop playback and do not leave the app 
   Spotify Connect playback. Implemented and verified.
 - `specs/002-playlist-detail-view/` — native playlist and Liked Songs detail page with virtualized
   rows, local search, sort, and pagination. Implemented; real-account and visual validation pending.
+- `specs/009-library-sidebar-parity/` — library panel redesign and native playlist/folder metadata.
+  Native saved categories, bounded Recents, pin state and explicit pin commands implemented;
+  account-write checks, creation/editing/drag organization and visual parity pending.

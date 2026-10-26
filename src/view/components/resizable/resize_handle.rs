@@ -31,7 +31,7 @@ impl AxisExt for Axis {
     }
 }
 
-pub(crate) const HANDLE_PADDING: Pixels = px(9.);
+pub(crate) const HANDLE_PADDING: Pixels = px(4.);
 pub(crate) const HANDLE_SIZE: Pixels = px(1.);
 
 /// Create a resize handle for a resizable panel.
@@ -122,7 +122,7 @@ impl<T: 'static, E: 'static + Render> Element for ResizeHandle<T, E> {
         window: &mut Window,
         cx: &mut App,
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
-        let neg_offset = -HANDLE_PADDING;
+        let neg_offset = -HANDLE_PADDING * 2.;
         let axis = self.axis;
 
         window.with_element_state(id.unwrap(), |state, window| {
@@ -163,7 +163,7 @@ impl<T: 'static, E: 'static + Render> Element for ResizeHandle<T, E> {
                                 .top_0()
                                 .left(neg_offset)
                                 .h_full()
-                                .w(HANDLE_SIZE)
+                                .w(HANDLE_SIZE + HANDLE_PADDING * 2.)
                                 .px(HANDLE_PADDING)
                         })
                         .when(axis.is_vertical(), |this| {
@@ -171,14 +171,14 @@ impl<T: 'static, E: 'static + Render> Element for ResizeHandle<T, E> {
                                 .top(neg_offset)
                                 .left_0()
                                 .w_full()
-                                .h(HANDLE_SIZE)
+                                .h(HANDLE_SIZE + HANDLE_PADDING * 2.)
                                 .py(HANDLE_PADDING)
                         }),
                 })
                 .child(
                     div()
                         .bg(bg_color)
-                        .group_hover("handle", |this| this.bg(bg_color))
+                        .group_hover("handle", |this| this.bg(rgb(0xb3b3b3)))
                         .when(axis.is_horizontal(), |this| this.h_full().w(HANDLE_SIZE))
                         .when(axis.is_vertical(), |this| this.w_full().h(HANDLE_SIZE)),
                 )

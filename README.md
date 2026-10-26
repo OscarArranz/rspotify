@@ -9,6 +9,12 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 - **Local playback**: registers as a Spotify Connect device (`rspotify`) and streams through librespot to the default audio output.
 - **Persistent session**: the refresh token, stable device id, and cached profile details are stored in `~/.cache/rspotify/`. Returning users see the app immediately while the session refreshes in the background; the browser login is only needed once.
 - **Playlist detail**: saved playlists and Liked Songs open in a Spotify-style page with a large header, virtualized track list, local search, sort, and context playback.
+- **Library panel**: saved playlists, albums, followed artists and podcasts from native services;
+  owner names, artwork fallbacks, Recents, pin indicators, search with highlighted matches,
+  category/ownership filters and four list/grid layouts. Liked Songs scrolls with the library.
+  Expansion uses the main area; the collapsed rail keeps rich hover cards and playback controls.
+- **Library pin/unpin**: explicit context-menu actions use native collection writes and verify the
+  resulting membership. Account-changing validation is still pending; no writes run on startup.
 - **Spotify-style UI**: custom titlebar, library sidebar, tabbed search results, playlist pages and a now-playing bar, built with GPUI.
 - **Smooth scrolling**: shared easing for wheel and touchpad input in the library, search results,
   horizontal carousels, and virtualized playlists.
@@ -23,9 +29,18 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 | Native session (login5/keymaster) | Implemented via librespot |
 | Search (all / songs / artists / albums / playlists / podcasts) | Implemented |
 | Local playback (play / pause / next / previous / seek / volume) | Implemented |
-| User library sidebar | Implemented |
+| User library sidebar | Native categories, Recents, filters, four layouts and pin commands; full parity pending |
 | Playlist detail + Liked Songs page | Implemented; visual and real-account checks pending |
-| Albums, queue, lyrics | Not yet |
+| Album/artist/podcast library navigation | Native context track page; dedicated entity layouts not yet |
+| Queue, lyrics | Not yet |
+
+The library redesign is **not yet a complete 1:1 implementation**: playlist/folder creation,
+Jam, queue, other editing and drag organization remain disabled. Recents uses the native endpoint's
+latest 50 contexts; older ordering and pin ordering may differ from Spotify's local library index.
+Pinning currently follows the installed desktop client's default four-item limit, not a claimed
+universal backend limit. Pin/unpin writes and exact visual parity still need validation. Some rich
+playlist labels (such as "Made for" / mixed playlists) remain unavailable. See
+[`specs/009-library-sidebar-parity/`](specs/009-library-sidebar-parity/).
 
 ## Requirements
 
@@ -103,13 +118,17 @@ src/
 ├── lib/spotify/
 │   ├── client.rs               # OAuth, librespot session, Connect/player control
 │   ├── playlist.rs             # native playlist detail, context pages, cover colours
+│   ├── library.rs              # native rootlist, folders, owners and artwork fallback
+│   ├── library_catalog.rs      # saved categories, batched decoration and pins
+│   ├── collection.rs           # native collection-v2 paging and explicit pin writes
 │   ├── search.rs               # Pathfinder persisted-query search
 │   ├── store.rs                # device id + refresh token persistence
 │   └── error.rs                # unified error type
 ├── router/                     # path + stack navigation
 ├── state/                      # global AppState (client handle)
 └── view/
-    ├── main_layout.rs          # library sidebar + content + player bar
+    ├── main_layout.rs          # resizable library/content split + player bar
+    ├── components/library/    # virtualized library panel and interactions
     ├── screens/playlist.rs     # playlist / Liked Songs detail page
     ├── screens/search.rs       # search tabs and results
     ├── screens/sign_in/        # login screen

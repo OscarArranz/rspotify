@@ -143,6 +143,103 @@ rootlist metadata or playlist detail record. The profile endpoint
 (`/user-profile-view/v3/profile/<username>`) returns the account name and avatar
 (`image_url`) but not the library.
 
+### Library sidebar follow-up (spec 009)
+
+The same installed artifact identity was rechecked with REA inspection
+`ev_594535c909364f9da23da669ddec0ce21afef8e706ee5fad149ad60b6390e970`.
+That evidence establishes package identity/inventory, not runtime behavior. Read-only inspection
+of `xpui-routes-your-library-x.js` and `.css` shows static implementations for compact/list/grid
+views, folders, pinning, creation, drag organization and collapsed/expanded layouts. Actual native
+service requests are delegated to shared modules and are not established by these UI call sites.
+
+The rootlist protobuf's `MetaItem.owner_username` supplies the owner that the original sidebar
+discarded. `Item.attributes.timestamp` supplies an added date, **not listening recency**. Folder
+hierarchy uses `spotify:start-group:` / `spotify:end-group:` markers; the decoder retains its stack
+between pages. Profile names are resolved using the existing native profile endpoint.
+
+If neither decorated rootlist nor playlist attributes supply a cover, the sidebar now examines
+up to eight playlist tracks through native track metadata and uses up to four distinct album
+covers. This is a bounded fallback, not a claim that its cover selection matches Spotify's exact
+collage algorithm. No whole-playlist track hydration is needed for a sidebar thumbnail.
+
+A user-approved read-only account smoke test initially verified rootlist hierarchy/identity and
+sampled owner/artwork hydration. The later debug-enabled inspection and standalone native reads
+below resolved saved categories, Recents and pin membership. No playback or library-editing
+commands were sent during validation. Pixel-level visual parity remains unverified.
+
+### Debug-enabled library investigation (spec 009 follow-up)
+
+The user started Spotify 1.2.95.453 with loopback CDP debugging. REA discovery
+`ev_44cc6297659070266cdb3fd9e6c5beffb5e880f58932f2e26bcb7a1cd0d3d1d5`, passive source capture
+`ev_4115702056b17bc78c41cc68338e5d12c799dff82b84ea5f4249f9f1a1e6cfaa` and verified script export
+`ev_f883d8bdd7109eeac96b49c75f20eb6f1cccf18716bacd8b95ed95b8d138f75e` establish the selected
+runtime and captured-source boundary. These captures are attach-limited; they do not contain
+prior network activity. Supplemental caller-authored read-only CDP probes inspected snapshot
+module source and the existing LibraryAPI without invoking playback or editing methods.
+
+The official LibraryAPI delegates to the local Esperanto
+`spotify.your_library_esperanto.proto.YourLibraryService`. Its decorated rows include owner,
+made-for, mixed-playlist, pin and timestamp fields. That local aggregation is not a standalone
+SpClient endpoint: rspotify does **not** depend on the official app remaining open.
+
+#### Independently verified read contracts
+
+| Purpose | Native request | Encoding / coverage |
+| --- | --- | --- |
+| Recent contexts | GET `/recently-played/v3/recently-played?limit=50&filter=default,collection-new-episodes` | `recently_played_backend.RecentlyPlayed` protobuf, not JSON; context URIs and epoch-millisecond timestamps |
+| Saved collections | POST `/collection/v2/paging` | Vendor protobuf; username, set, pagination token, limit 300 |
+| Catalog decoration | POST `/extended-metadata/v0/extended-metadata` through librespot | Bounded ALBUM_V4, ARTIST_V4 and SHOW_V4 batches |
+
+Collection paging sends both Accept and Content-Type as
+`application/vnd.collection-v2.spotify.proto`. The wire sets are `collection` (music collection),
+`artist` (followed artists), `show` (saved podcasts), and `ylpin` (pins). The `collection` response
+contains direct album memberships alongside track/local items; the sidebar selects the direct
+album URIs rather than inferring saved albums from the albums of liked tracks. Read-only checks
+verified complete category decoration, pin membership and album/artist/show context navigation.
+
+`PageRequest` fields are username=1, set=2, pagination_token=3, limit=4. `PageResponse` contains
+items=1, next_page_token=2 and sync_token=3. `CollectionItem` contains uri=1, **int64** added_at=2,
+is_removed=3, optional context_uri=4 and optional item_data=5. The native descriptor differs from
+librespot's unused `collection2v2.proto`, which still declares an int32 date. The reader preserves
+i64 dates, skips newer fields, applies tombstones and rejects repeated pagination tokens.
+
+The `prerelease` wire set was also confirmed statically and read successfully, but this check did
+not establish a prerelease membership/decoration flow. Future album dates can produce a derived
+"Upcoming album" label; that is not a claim that Spotify's full prerelease subsystem is reproduced.
+Recents remains bounded to the latest 50 server contexts. Older ordering, local browsing activity,
+mixed-playlist/Made-for decoration and native pin rank are not fully reproduced.
+
+#### Static native write evidence; not account-write validation
+
+Artifact: installed `spotify` ELF SHA-256
+`81fe35f3e09ce47b1b1c573eb32d680cafda870132e344c7185a881cdb927544`.
+The following evidence came from bounded `objdump` disassembly and embedded-descriptor parsing,
+not from a REA native provider or an observed account mutation:
+
+- Paging function `0x2c75030`; `0x2c751f4–0x2c75222` constructs `collection/v2/paging`;
+  `0x2c7523d` selects POST; the page size at `0x2c7514e` is 300.
+- Native set conversion at `0x2cbb320` maps collection/artist/show/ylpin and prerelease to their
+  wire strings. Do not confuse this internal enum with the Esperanto CollectionSet enum.
+- Collection descriptor at file offset `0x8a5f70` supplies the current request/item schema.
+- `0x2c7437f–0x2c7440e` constructs POST `collection/v2/write`; its serialization/header setup
+  follows at `0x2c74416–0x2c74537` using the same vendor-protobuf headers as paging.
+- WriteRequest fields: username=1, set=2, repeated items=3, client_update_id=4. Native ID generation
+  at `0x2c73f9a–0x2c73fc3` formats a generated 64-bit value with `%016llx`: 16 lowercase hex digits,
+  not a UUID. The native success callback checks HTTP 200 and does not decode a WriteResponse.
+- `core_your_library_max_pinned_items` has default 4 at `0x1f1393f–0x1f13966`. A configurable
+  maximum exists; four is not established as a universal backend limit.
+
+rspotify's explicit Pin/Unpin action writes a single ylpin membership and verifies it with bounded
+reads before changing the UI. It does not report optimistic success. Account-write validation was
+**not performed**; offline tests cover serialization, including remove/timestamp/update-ID fields.
+
+Rootlist mutation routing was partially recovered as POST
+`/playlist/v2/user/<username>/rootlist/changes` at `0x2bde2c0`, but its complete body/revision contract
+and playlist creation contract remain unresolved. Creation and other editing stay disabled.
+Native folder formatting at `0x2c55750` uses `spotify:start-group:<hex-id>:<encoded-name>` and
+`spotify:end-group:<hex-id>`; its name encoding uses `+` for spaces and uppercase `%HH` escapes.
+The rootlist decoder accepts that encoding as well as percent-encoded spaces.
+
 ## Playlist detail and context pages
 
 The playlist detail page uses the same native services as librespot rather than the public

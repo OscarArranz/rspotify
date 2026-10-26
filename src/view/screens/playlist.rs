@@ -567,7 +567,7 @@ impl PlaylistScreen {
                         div()
                             .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .child("Playlist"),
+                            .child(self.source.kind_label()),
                     )
                     .child(
                         div()
@@ -656,7 +656,7 @@ impl PlaylistScreen {
                         div()
                             .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .child("Playlist"),
+                            .child(self.source.kind_label()),
                     )
                     .child(
                         div()
