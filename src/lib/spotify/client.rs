@@ -81,6 +81,42 @@ pub struct NowPlaying {
     pub duration_ms: u64,
 }
 
+/// Repeat behavior requested from the local Connect device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    /// Repeat the whole context (playlist, album, or track list).
+    Context,
+    /// Repeat the current track.
+    Track,
+}
+
+impl RepeatMode {
+    pub fn is_active(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// Advances through the Spotify repeat cycle: off, context, track.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Context,
+            Self::Context => Self::Track,
+            Self::Track => Self::Off,
+        }
+    }
+
+    fn from_flags(context: bool, track: bool) -> Self {
+        if track {
+            Self::Track
+        } else if context {
+            Self::Context
+        } else {
+            Self::Off
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlaybackSnapshot {
     pub now_playing: Option<NowPlaying>,
@@ -88,7 +124,7 @@ pub struct PlaybackSnapshot {
     pub position_ms: u64,
     pub volume_percent: u8,
     pub shuffle: bool,
-    pub repeat: bool,
+    pub repeat: RepeatMode,
     /// The context URI last loaded by rspotify, when playback was started from a playlist,
     /// album, artist, or collection rather than an ad-hoc list of tracks.
     pub context_uri: Option<String>,
@@ -102,7 +138,7 @@ impl Default for PlaybackSnapshot {
             position_ms: 0,
             volume_percent: 50,
             shuffle: false,
-            repeat: false,
+            repeat: RepeatMode::Off,
             context_uri: None,
         }
     }
@@ -713,10 +749,14 @@ impl NativeSpotify {
             .map_err(|error| SpotifyError::Playback(error.to_string()))
     }
 
-    pub fn set_repeat(&self, repeat: bool) -> Result<(), SpotifyError> {
+    pub fn set_repeat_mode(&self, mode: RepeatMode) -> Result<(), SpotifyError> {
         self.inner
             .spirc
-            .repeat(repeat)
+            .repeat(matches!(mode, RepeatMode::Context))
+            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
+        self.inner
+            .spirc
+            .repeat_track(matches!(mode, RepeatMode::Track))
             .map_err(|error| SpotifyError::Playback(error.to_string()))
     }
 }
@@ -807,8 +847,8 @@ fn apply_player_event(inner: &mut PlaybackInner, event: PlayerEvent, now: Instan
         PlayerEvent::ShuffleChanged { shuffle } => {
             inner.snapshot.shuffle = shuffle;
         }
-        PlayerEvent::RepeatChanged { context, .. } => {
-            inner.snapshot.repeat = context;
+        PlayerEvent::RepeatChanged { context, track } => {
+            inner.snapshot.repeat = RepeatMode::from_flags(context, track);
         }
         _ => {}
     }
@@ -1230,6 +1270,55 @@ mod tests {
         inner.apply_connect_state(&remote, "rspotify-device", start);
         assert_eq!(inner.snapshot.position_ms, 42_000);
         assert!(!inner.snapshot.is_playing);
+    }
+
+    #[test]
+    fn repeat_and_shuffle_events_update_transport_snapshot() {
+        let start = Instant::now();
+        let mut inner = playback_clock(start);
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::ShuffleChanged { shuffle: true },
+            start,
+        );
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::RepeatChanged {
+                context: true,
+                track: false,
+            },
+            start,
+        );
+        assert!(inner.snapshot.shuffle);
+        assert_eq!(inner.snapshot.repeat, RepeatMode::Context);
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::RepeatChanged {
+                context: false,
+                track: true,
+            },
+            start,
+        );
+        assert_eq!(inner.snapshot.repeat, RepeatMode::Track);
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::RepeatChanged {
+                context: false,
+                track: false,
+            },
+            start,
+        );
+        assert_eq!(inner.snapshot.repeat, RepeatMode::Off);
+    }
+
+    #[test]
+    fn repeat_mode_cycles_off_context_track() {
+        assert_eq!(RepeatMode::Off.next(), RepeatMode::Context);
+        assert_eq!(RepeatMode::Context.next(), RepeatMode::Track);
+        assert_eq!(RepeatMode::Track.next(), RepeatMode::Off);
+        assert!(!RepeatMode::Off.is_active());
+        assert!(RepeatMode::Context.is_active());
+        assert!(RepeatMode::Track.is_active());
     }
 
     #[test]
