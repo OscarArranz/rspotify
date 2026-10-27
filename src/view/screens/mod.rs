@@ -1,3 +1,4 @@
+pub(crate) mod artist;
 pub(crate) mod home;
 mod home_video;
 pub(crate) mod playlist;

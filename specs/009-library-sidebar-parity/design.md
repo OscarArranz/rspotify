@@ -53,6 +53,8 @@ calls to shared modules; request contracts and runtime availability remain separ
   Only catalog-level failures (collection sets, pins, recents, decoration batches) show the retry
   banner. `RSPOTIFY_LIBRARY_DIAGNOSTICS=1` emits failure counts and classes without titles or URIs.
 - Router: retains source identity alongside history so selection follows back/forward navigation.
+  Per spec 010, artist rows push a dedicated `ArtistScreen`; album and show rows keep the native
+  context track page.
 
 All network and hydration work stays on workers. Results return via oneshot/mpsc; refreshes use
 generation guards. Item-level metadata misses leave the row usable with its rootlist fallback, and

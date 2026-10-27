@@ -6,6 +6,7 @@
 //! - search through `api-partner.spotify.com/pathfinder/v1/query`
 //! - playback through Spotify Connect (librespot) and the local audio backend
 
+mod artist;
 mod client;
 mod collection;
 mod error;
@@ -16,6 +17,9 @@ mod playlist;
 mod search;
 mod store;
 
+pub use artist::{
+    ArtistCard, ArtistCardKind, ArtistConcert, ArtistMerch, ArtistProfile, ArtistTrack, ArtistVideo,
+};
 pub use client::{LikedStatus, NativeSpotify, PlaybackSnapshot, RepeatMode, UserProfile};
 pub use error::SpotifyError;
 pub use playlist::{PlaylistDetail, PlaylistPage, PlaylistSource};

@@ -89,10 +89,12 @@ header can distinguish "this playlist is active" from "a track from this playlis
 
 Global state remains unchanged: `AppState` holds only the authenticated client handle.
 
-Spec 009 adds a `PlaylistSource::Context` preview for album/artist/podcast library rows. Those
+Spec 009 adds a `PlaylistSource::Context` preview for album and podcast library rows. Those
 sources reuse this track-page renderer but load their native context directly, without incorrectly
 calling `Playlist::get` on a non-playlist URI. Their cached identity is the context URI and their
-header kind comes from the source preview. This is not a dedicated album/artist-page redesign.
+header kind comes from the source preview. Spec 010 supersedes the earlier artist behaviour:
+library and search artist entry points now push a dedicated `ArtistScreen` instead of reusing this
+page.
 
 ## Rendering
 
