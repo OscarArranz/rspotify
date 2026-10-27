@@ -145,3 +145,6 @@ The playback test starts audio. Pause or stop playback and do not leave the app 
   visuals, playback actions and separate announcement/feedback integration remain pending.
 - `specs/009-player-bar-transport-controls/` — Spotify-style shuffle, previous, play/pause, next,
   and repeat transport row. Implemented; real-account and visual validation pending.
+- `specs/011-like-unlike-songs/` — native Like/Unlike controls in the now-playing bar and playlist
+  rows, with per-session membership, optimistic updates and Liked Songs pruning. Implemented;
+  live write and visual validation pending.

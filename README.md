@@ -11,7 +11,8 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
   Playlist, album, artist and podcast cards open native detail/context pages.
 - **Local playback**: registers as a Spotify Connect device (`rspotify`) and streams through librespot to the default audio output.
 - **Persistent session**: the refresh token, stable device id, and cached profile details are stored in `~/.cache/rspotify/`. Returning users see the app immediately while the session refreshes in the background; the browser login is only needed once.
-- **Playlist detail**: saved playlists and Liked Songs open in a Spotify-style page with a large header, virtualized track list, local search, sort, and context playback.
+- **Playlist detail**: saved playlists and Liked Songs open in a Spotify-style page with a large header, virtualized track list, local search, sort, context playback and per-row Like controls.
+- **Like/unlike songs**: the now-playing bar and every playlist/context page show Spotify's plus/check control backed by the native collection service. Unliking from Liked Songs removes the row from the open list.
 - **Library panel**: saved playlists, albums, followed artists and podcasts from native services;
   owner names, artwork fallbacks, Recents, pin indicators, search with highlighted matches,
   category/ownership filters and four list/grid layouts. Liked Songs scrolls with the library.
@@ -35,6 +36,7 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 | Local playback (play / pause / next / previous / seek / volume) | Implemented |
 | User library sidebar | Native categories, Recents, filters, four layouts and pin commands; full parity pending |
 | Playlist detail + Liked Songs page | Implemented; visual and real-account checks pending |
+| Like/unlike songs (player bar + detail rows) | Implemented; live write validation pending |
 | Album/artist/podcast library navigation | Native context track page; dedicated entity layouts not yet |
 | Queue, lyrics | Not yet |
 
@@ -55,6 +57,11 @@ audio preview mixing, save/feedback mutations or announcement-service integratio
 Spotlight/promotion sections with supported content have a featured layout, but full announcement
 banner/menu parity and real-desktop visual checks remain pending. See
 [`specs/010-home-screen/`](specs/010-home-screen/).
+
+Like/unlike controls read membership from the native `collection` set once per session and write
+through `collection/v2/write`. Offline tests cover the request encoding, membership filtering and
+Liked Songs row removal. Account-mutating like/unlike validation and a live visual check are still
+pending and must be run explicitly. See [`specs/011-like-unlike-songs/`](specs/011-like-unlike-songs/).
 
 ## Requirements
 

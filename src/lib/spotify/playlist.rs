@@ -117,6 +117,33 @@ pub struct PlaylistPage {
     pub next_page_url: Option<String>,
 }
 
+impl PlaylistDetail {
+    /// Remove every occurrence of a track URI and keep aggregate counts consistent.
+    /// Used after a confirmed unlike so cached and open Liked Songs pages agree.
+    pub(crate) fn remove_track_uri(&mut self, uri: &str) -> usize {
+        let mut removed = 0usize;
+        let mut removed_duration = 0u64;
+        self.tracks.retain(|track| {
+            if track.uri == uri {
+                removed += 1;
+                removed_duration = removed_duration.saturating_add(track.duration_ms);
+                false
+            } else {
+                true
+            }
+        });
+        if removed == 0 {
+            return 0;
+        }
+        self.track_count = self.track_count.map(|count| count.saturating_sub(removed));
+        self.total_duration_ms = self
+            .total_duration_ms
+            .map(|duration| duration.saturating_sub(removed_duration));
+        self.added_at.remove(uri);
+        removed
+    }
+}
+
 fn detail_cache_path(account: &str, source: &PlaylistSource) -> PathBuf {
     let identity = match source {
         PlaylistSource::Playlist { uri, .. } | PlaylistSource::Context { uri, .. } => uri.as_str(),
@@ -1184,6 +1211,41 @@ mod tests {
         );
         assert_eq!(image_url_from_picture(&[]), None);
         assert_eq!(image_url_from_picture(&[0xab; 19]), None);
+    }
+
+    #[test]
+    fn removing_a_liked_track_updates_duplicates_counts_and_duration() {
+        let mut detail = PlaylistDetail {
+            track_count: Some(3),
+            total_duration_ms: Some(600_000),
+            tracks: vec![
+                PlaylistTrack {
+                    uri: "spotify:track:first".into(),
+                    duration_ms: 120_000,
+                    ..Default::default()
+                },
+                PlaylistTrack {
+                    uri: "spotify:track:gone".into(),
+                    duration_ms: 180_000,
+                    ..Default::default()
+                },
+                PlaylistTrack {
+                    uri: "spotify:track:gone".into(),
+                    duration_ms: 300_000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        detail.added_at.insert("spotify:track:gone".into(), 42);
+
+        assert_eq!(detail.remove_track_uri("spotify:track:gone"), 2);
+        assert_eq!(detail.tracks.len(), 1);
+        assert_eq!(detail.track_count, Some(1));
+        assert_eq!(detail.total_duration_ms, Some(120_000));
+        assert!(!detail.added_at.contains_key("spotify:track:gone"));
+        assert_eq!(detail.remove_track_uri("spotify:track:missing"), 0);
+        assert_eq!(detail.track_count, Some(1));
     }
 
     #[test]

@@ -1,18 +1,18 @@
 use std::time::{Duration, Instant};
 
+use futures::channel::oneshot;
 use gpui::{
-    AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
+    AnyElement, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
     StatefulInteractiveElement, Styled, Subscription, Window, canvas, div, img,
     prelude::FluentBuilder, px, relative, rgb, svg,
 };
 
-use crate::lib::spotify::{
-    LibraryPlaylist, NativeSpotify, PlaybackSnapshot, PlaylistSource, RepeatMode,
-};
+use crate::lib::spotify::{LikedStatus, NativeSpotify, PlaybackSnapshot, RepeatMode};
 use crate::router::{StackRouter, StackRouterHandle};
 use crate::state::AppState;
 use crate::view::components::library::{LibrarySidebar, LibrarySize};
+use crate::view::components::liked::{MUTED, like_plus, liked_check};
 use crate::view::components::render_cache::{cached_bar, cached_fill};
 use crate::view::components::resizable::{ResizableState, h_resizable, resizable_panel};
 use crate::view::screens::home::HomeScreen;
@@ -184,6 +184,16 @@ struct PlayerBar {
     optimistic_shuffle: Option<OptimisticToggle>,
     optimistic_repeat: Option<OptimisticRepeat>,
     last_nonzero_volume: u8,
+    liked_revision: u64,
+    like_pending_uri: Option<String>,
+    like_override: Option<(String, bool)>,
+    like_error: Option<LikeError>,
+}
+
+struct LikeError {
+    uri: String,
+    message: String,
+    at: Instant,
 }
 
 struct OptimisticSeek {
@@ -241,19 +251,48 @@ impl PlayerBar {
         } else {
             50
         };
+        let liked_revision = client.liked_revision();
+        client.ensure_liked_tracks_loaded();
         let poll_client = client.clone();
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(250))
                     .await;
+                poll_client.ensure_liked_tracks_loaded();
                 let snapshot = poll_client.playback();
+                let liked_revision = poll_client.liked_revision();
                 let updated = this.update(cx, |this, cx| {
-                    if this.playback != snapshot {
+                    let track_changed = this
+                        .playback
+                        .now_playing
+                        .as_ref()
+                        .map(|track| track.uri.as_str())
+                        != snapshot
+                            .now_playing
+                            .as_ref()
+                            .map(|track| track.uri.as_str());
+                    if track_changed {
+                        this.like_pending_uri = None;
+                        this.like_override = None;
+                        this.like_error = None;
+                    }
+                    let error_expired = this
+                        .like_error
+                        .as_ref()
+                        .is_some_and(|error| error.at.elapsed() >= Duration::from_secs(5));
+                    if error_expired {
+                        this.like_error = None;
+                    }
+                    if this.playback != snapshot
+                        || this.liked_revision != liked_revision
+                        || error_expired
+                    {
                         if snapshot.volume_percent > 0 {
                             this.last_nonzero_volume = snapshot.volume_percent;
                         }
                         this.playback = snapshot;
+                        this.liked_revision = liked_revision;
                         cx.notify();
                     }
                 });
@@ -275,6 +314,10 @@ impl PlayerBar {
             optimistic_shuffle: None,
             optimistic_repeat: None,
             last_nonzero_volume,
+            liked_revision,
+            like_pending_uri: None,
+            like_override: None,
+            like_error: None,
         }
     }
 
@@ -311,6 +354,98 @@ impl PlayerBar {
                 started_at: Instant::now(),
             });
         }
+        cx.notify();
+    }
+
+    fn render_like_control(
+        &self,
+        uri: String,
+        liked: Option<bool>,
+        pending: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let unknown = liked.is_none();
+        let icon = match liked {
+            Some(true) => liked_check(22.0),
+            _ => like_plus(22.0, if unknown { 0x5a5a5a } else { MUTED }),
+        };
+        div()
+            .id("player-like")
+            .flex_shrink_0()
+            .size(px(26.0))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .opacity(if pending || unknown { 0.45 } else { 1.0 })
+            .hover(|style| style.opacity(1.0))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if pending || this.like_pending_uri.is_some() {
+                    return;
+                }
+                let Some(currently_liked) = liked else {
+                    this.client.ensure_liked_tracks_loaded();
+                    cx.notify();
+                    return;
+                };
+                this.toggle_liked(uri.clone(), currently_liked, cx);
+            }))
+            .child(icon)
+            .into_any_element()
+    }
+
+    fn toggle_liked(&mut self, uri: String, currently_liked: bool, cx: &mut Context<Self>) {
+        if self.like_pending_uri.is_some() {
+            return;
+        }
+        let target = !currently_liked;
+        let client = self.client.clone();
+        let worker_uri = uri.clone();
+        self.like_pending_uri = Some(uri.clone());
+        self.like_override = Some((uri.clone(), target));
+        self.like_error = None;
+        let (tx, rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(client.set_liked(&worker_uri, target));
+        });
+        cx.spawn(async move |this, cx| {
+            let result = rx.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.like_pending_uri.as_deref() == Some(uri.as_str()) {
+                    this.like_pending_uri = None;
+                }
+                if this
+                    .like_override
+                    .as_ref()
+                    .is_some_and(|(pending, _)| pending == &uri)
+                {
+                    this.like_override = None;
+                }
+                match result {
+                    Ok(Ok(())) => {
+                        this.liked_revision = this.client.liked_revision();
+                    }
+                    Ok(Err(_)) => {
+                        this.like_error = Some(LikeError {
+                            uri: uri.clone(),
+                            message: "Couldn't update Liked Songs".into(),
+                            at: Instant::now(),
+                        });
+                        eprintln!("liked songs update failed");
+                    }
+                    Err(_) => {
+                        this.like_error = Some(LikeError {
+                            uri: uri.clone(),
+                            message: "Couldn't update Liked Songs".into(),
+                            at: Instant::now(),
+                        });
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 }
@@ -361,6 +496,32 @@ impl Render for PlayerBar {
             .map(|pending| pending.mode)
             .unwrap_or(self.playback.repeat);
         let track = self.playback.now_playing.clone();
+        let like_uri = track
+            .as_ref()
+            .map(|track| track.uri.clone())
+            .unwrap_or_default();
+        let like_supported = like_uri.starts_with("spotify:track:");
+        let like_base = if like_supported {
+            self.client.liked_status(&like_uri)
+        } else {
+            LikedStatus::Unknown
+        };
+        let like_override = self
+            .like_override
+            .as_ref()
+            .filter(|(uri, _)| uri == &like_uri)
+            .map(|(_, liked)| *liked);
+        let like_state = like_override.or(match like_base {
+            LikedStatus::Liked => Some(true),
+            LikedStatus::NotLiked => Some(false),
+            LikedStatus::Unknown => None,
+        });
+        let like_pending = self.like_pending_uri.as_deref() == Some(like_uri.as_str());
+        let like_error = self
+            .like_error
+            .as_ref()
+            .filter(|error| error.uri == like_uri && error.at.elapsed() < Duration::from_secs(5))
+            .map(|error| error.message.clone());
         let position = self
             .optimistic_seek
             .as_ref()
@@ -510,7 +671,7 @@ impl Render for PlayerBar {
                     .flex()
                     .items_center()
                     .gap(px(12.0))
-                    .w(px(300.0))
+                    .w(px(320.0))
                     .flex_shrink_0()
                     .child(match track.as_ref().and_then(|t| t.cover_url.clone()) {
                         Some(url) => img(url).size(px(56.0)).rounded(px(6.0)).into_any_element(),
@@ -525,9 +686,12 @@ impl Render for PlayerBar {
                             .flex()
                             .flex_col()
                             .gap(px(3.0))
+                            .flex_1()
+                            .min_w(px(0.0))
                             .overflow_hidden()
                             .child(
                                 div()
+                                    .truncate()
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(
@@ -538,13 +702,24 @@ impl Render for PlayerBar {
                                     ),
                             )
                             .child(
-                                div().text_xs().text_color(rgb(0xb3b3b3)).child(
-                                    track.as_ref().map(|t| t.artists.clone()).unwrap_or_else(
-                                        || "Search for a song to start listening".into(),
-                                    ),
-                                ),
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(if like_error.is_some() {
+                                        rgb(0xff6b6b)
+                                    } else {
+                                        rgb(0xb3b3b3)
+                                    })
+                                    .child(like_error.unwrap_or_else(|| {
+                                        track.as_ref().map(|t| t.artists.clone()).unwrap_or_else(
+                                            || "Search for a song to start listening".into(),
+                                        )
+                                    })),
                             ),
-                    ),
+                    )
+                    .children(like_supported.then(|| {
+                        self.render_like_control(like_uri.clone(), like_state, like_pending, cx)
+                    })),
             )
             .child(
                 // Center controls + progress
