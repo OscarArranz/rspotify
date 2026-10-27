@@ -16,6 +16,8 @@ GPUI scrollable divs currently apply incoming wheel deltas directly to their off
 helper owns the scroll offset and eases both pixel and line deltas: Linux wheel events can be
 pixel-based too. Scrollable divs use clipped overflow plus a tracked handle, disabling GPUI's
 immediate wheel movement; the helper consumes input only when the requested axis can move.
+Horizontal divs additionally require the Shift modifier; without it they leave the event
+unconsumed so the vertical parent can handle it.
 Repeated input accumulates toward a clamped target; reversing direction discards stale momentum.
 Frames follow a responsive 18 ms time-based exponential curve and stop once within sub-pixel
 tolerance of the destination, so ordinary wheel steps settle in roughly 100 ms. It must not block GPUI's

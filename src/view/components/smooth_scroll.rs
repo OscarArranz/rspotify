@@ -141,6 +141,9 @@ fn handle_wheel(
     state: &SmoothScrollState,
     on_scroll: &OnScroll,
 ) {
+    if matches!(surface, Surface::Div(_, ScrollAxis::Horizontal)) && !event.modifiers.shift {
+        return;
+    }
     let delta = event.delta.pixel_delta(px(20.0));
     let delta = match surface {
         Surface::Div(_, ScrollAxis::Horizontal) => {
@@ -348,6 +351,10 @@ mod tests {
             cx.simulate_event(ScrollWheelEvent {
                 position: point(px(10.0), px(10.0)),
                 delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
+                modifiers: gpui::Modifiers {
+                    shift: matches!(axis, ScrollAxis::Horizontal),
+                    ..Default::default()
+                },
                 ..Default::default()
             });
             assert_eq!(handle.offset(), point(px(0.0), px(0.0)));
@@ -369,6 +376,10 @@ mod tests {
             cx.simulate_event(ScrollWheelEvent {
                 position: point(px(10.0), px(10.0)),
                 delta: gpui::ScrollDelta::Lines(point(0.0, -3.0)),
+                modifiers: gpui::Modifiers {
+                    shift: matches!(axis, ScrollAxis::Horizontal),
+                    ..Default::default()
+                },
                 ..Default::default()
             });
             assert_eq!(state.0.borrow().target, -120.0);
@@ -514,6 +525,10 @@ mod tests {
         let wheel = ScrollWheelEvent {
             position: point(px(10.0), px(10.0)),
             delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
+            modifiers: gpui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
         cx.simulate_event(wheel.clone());

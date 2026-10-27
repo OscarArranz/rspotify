@@ -22,6 +22,9 @@ animation rewound already-clamped movement. Previous completion marks do not est
 
 ### Correction validation
 
+- [x] Require Shift for horizontal div wheel input and preserve ordinary vertical wheel bubbling.
+- [ ] Verify Shift+wheel carousel movement and unmodified vertical scrolling visually; pending.
+
 - `cargo fmt --check`, `cargo check`, `cargo test`, and `cargo build` pass. Existing compiler
   warnings remain. Full suite: 19 passed, 3 ignored (account/network smoke tests).
 - Six scroll regression tests cover pixel/line dispatch for both axes, no native offset jump,
