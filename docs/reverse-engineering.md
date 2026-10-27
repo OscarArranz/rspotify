@@ -300,6 +300,65 @@ The official playlist route can render genre/mood filter chips when its payload 
 them. The native playlist/context payload used here does not provide a dependable chip list,
 so rspotify deliberately omits chips rather than inventing labels.
 
+## Artist profiles (spec 010)
+
+The artist page uses the installed client's persisted Pathfinder document rather than any public
+Web API:
+
+- Endpoint: `GET https://api-partner.spotify.com/pathfinder/v1/query`
+- `operationName=queryArtistOverview`
+- Persisted-query hash:
+  `1ac33ddab5d39a3a9c27802774e6d78b9405cc188c6f75aed007df2a32737c72`
+- Variables: `{ "uri": "spotify:artist:<id>", "locale": null }`
+- Authorization: login5 `auth_token`, plus `App-Platform: WebPlayer` and the desktop
+  `Spotify-App-Version` header.
+
+The response root is `data.artistUnion`. Paths validated against a real, read-only response:
+
+| Section | Observed paths |
+| --- | --- |
+| Identity | `__typename`, `uri`, `profile.name`, `profile.verified`, `visuals.avatarImage.sources` |
+| Hero | `headerImage.data.sources` / `visualIdentity.wideFullBleedImage.data.sources`; both can be `null` |
+| About | `profile.biography.text`, `stats.monthlyListeners`, `stats.followers`, `stats.worldRank`, `stats.topCities.items`, `visuals.gallery.items` |
+| Follow state | `saved` (boolean) |
+| Popular | `discography.topTracks.items[].track` (URI, name, artists, albumOfTrack, duration, contentRating, playability, `associationsV3.videoAssociations.totalCount`) |
+| Liked | `profile.likedMusic`; absent for every artist probed |
+| Pick | `profile.pinnedItem`, entity under `itemV2.data`, optional `comment`/`subtitle` |
+| Discography | `discography.popularReleasesAlbums`, `albums`, `singles`, `compilations`; each entry wraps the release in `releases.items` |
+| Related content | `relatedContent.featuringV2.items[].data`, `discoveredOnV2.items[].data`, `relatedArtists.items[]` |
+| Appears on | `relatedContent.appearsOn.items[].releases.items` |
+| Videos | `relatedMusicVideos.items`, `unmappedMusicVideos.items`, and `watchFeedEntrypoint` |
+| Tour | `goods.concerts.items[]` with `startDateIsoString`, `location.city`, `location.name` |
+| Merch | `goods.merch.items[]` with `nameV2`, `price`, `image.sources` |
+
+`serde_json::Value::pointer` requires a leading `/`; the parser accepts the shorter `a/b` form used
+throughout `artist.rs` through a small normaliser.
+
+Observed section availability in the bounded read-only probe (artist names, URIs, and payload
+values deliberately not recorded):
+
+- Popular tracks returned 5–10 items.
+- `popularReleasesAlbums` and `singles` returned up to 10; `albums` returned 0–6; compilations were
+  usually empty.
+- Related artists returned up to 20, discovered-on up to 12, appears-on up to 20, and featuring
+  playlists up to 5 depending on the artist.
+- Some artists supplied an artist pick, a header image, three merch items, and eight concert dates;
+  every probed artist supplied a `watchFeedEntrypoint` thumbnail card.
+- `profile.likedMusic` was absent for all probed artists, so the "You Liked" section only renders
+  when the field appears.
+- `relatedMusicVideos`/`unmappedMusicVideos` mostly returned empty arrays; the
+  `watchFeedEntrypoint` card is therefore shown as metadata only.
+- One probed artist was unverified and had no monthly listeners or world rank; those elements were
+  omitted while the profile still rendered.
+
+Follow/unfollow is not implemented. `saved` exposes current membership, but no verified native
+write contract for toggling artist follows was established, and account writes were outside the
+approved scope. The action is hidden instead of showing optimistic state. Video cards and merch
+cards are metadata-only: video playback needs a protected path rspotify does not implement, and
+merch checkout stays external. For the diagnostics used during validation,
+`RSPOTIFY_ARTIST_DIAGNOSTICS` prints JSON paths/lengths only and `RSPOTIFY_ARTIST_PROBE_LIMIT`
+bounds how many saved artists the ignored smoke test walks.
+
 ## What is observed vs. inferred
 
 Confirmed directly from the artifact:
@@ -314,6 +373,8 @@ Confirmed at runtime (against a valid account):
 - OAuth login with the desktop client id and loopback redirect
 - login5 session establishment
 - Pathfinder `searchDesktop` returning tracks, artists, albums and playlists
+- Pathfinder `queryArtistOverview` returning identity, stats, discography, related content, goods,
+  and an optional watch entrypoint
 - local Connect playback (load, progress, pause) through librespot
 
 Inferred or delegated to librespot:

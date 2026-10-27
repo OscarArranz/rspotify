@@ -9,6 +9,9 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 - **Local playback**: registers as a Spotify Connect device (`rspotify`) and streams through librespot to the default audio output.
 - **Persistent session**: the refresh token, stable device id, and cached profile details are stored in `~/.cache/rspotify/`. Returning users see the app immediately while the session refreshes in the background; the browser login is only needed once.
 - **Playlist detail**: saved playlists and Liked Songs open in a Spotify-style page with a large header, virtualized track list, local search, sort, and context playback.
+- **Artist profiles**: library and search artist results open a native artist page with a hero,
+  popular tracks, discography filters, featuring/discovered-on/appears-on shelves, related artists,
+  concerts, merch, an about panel, and metadata-only music-video cards. Spec 010.
 - **Library panel**: saved playlists, albums, followed artists and podcasts from native services;
   owner names, artwork fallbacks, Recents, pin indicators, search with highlighted matches,
   category/ownership filters and four list/grid layouts. Liked Songs scrolls with the library.
@@ -31,7 +34,8 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 | Local playback (play / pause / next / previous / seek / volume) | Implemented |
 | User library sidebar | Native categories, Recents, filters, four layouts and pin commands; full parity pending |
 | Playlist detail + Liked Songs page | Implemented; visual and real-account checks pending |
-| Album/artist/podcast library navigation | Native context track page; dedicated entity layouts not yet |
+| Artist profiles | Implemented; read-only account probe passed, follow/unfollow and video playback unavailable |
+| Album/podcast library navigation | Native context track page; dedicated entity layouts not yet |
 | Queue, lyrics | Not yet |
 
 The library redesign is **not yet a complete 1:1 implementation**: playlist/folder creation,
@@ -172,7 +176,8 @@ client id, Pathfinder query hashes and which parts are confirmed versus inferred
 
 - [x] Playlist detail view
 - [ ] Queue
-- [ ] Album/artist pages
+- [x] Artist profiles
+- [ ] Album pages
 - [x] Liked Songs detail and playback
 - [ ] Lyrics
 - [ ] Keyboard shortcuts and system media controls

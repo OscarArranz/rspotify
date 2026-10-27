@@ -47,8 +47,9 @@ playback or account mutation controls may be invoked during inspection.
 
 ## Boundaries
 
-The titlebar, player bar and unrelated playlist-page controls are not redesigned. Album/artist/show
-rows may reuse the native context track page; dedicated entity-page redesigns are outside scope.
+The titlebar, player bar and unrelated playlist-page controls are not redesigned. Album and show
+rows reuse the native context track page; spec 010 moves artist rows to a dedicated `ArtistScreen`.
+Other dedicated entity-page redesigns are outside scope.
 Do not use the public Web API, modify credentials, automate unapproved applications, or start playback
 during validation. Read-only inspection of the user-started Spotify client is approved.
 Network/account checks and real mutations require explicit user approval. Shipped static code is

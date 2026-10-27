@@ -30,6 +30,7 @@ use crate::lib::spotify::library_catalog::LibrarySupplement;
 use crate::lib::spotify::{NativeSpotify, PlaybackSnapshot, PlaylistSource};
 use crate::router::StackRouterHandle;
 use crate::view::components::smooth_scroll::{SmoothScrollState, list_scroll_overlay};
+use crate::view::screens::artist::{ArtistScreen, ArtistSource};
 use crate::view::screens::playlist::PlaylistScreen;
 use model::{Filter, LibraryView, Ownership, match_ranges};
 
@@ -497,12 +498,21 @@ impl LibrarySidebar {
         let Some(router) = cx.try_global::<StackRouterHandle>().cloned() else {
             return;
         };
+        if entry.kind == LibraryKind::Artist {
+            if router.current_source(cx) != Some(entry.uri.as_str()) {
+                let source = ArtistSource::new(
+                    entry.uri.clone(),
+                    entry.name,
+                    entry.image_url.or_else(|| entry.covers.first().cloned()),
+                );
+                let screen = cx.new(|cx| ArtistScreen::new(source, client, cx));
+                router.push_for_source(screen.into(), entry.uri, cx);
+            }
+            return;
+        }
         let source = if entry.kind == LibraryKind::LikedSongs {
             PlaylistSource::LikedSongs
-        } else if matches!(
-            entry.kind,
-            LibraryKind::Album | LibraryKind::Artist | LibraryKind::Show
-        ) {
+        } else if matches!(entry.kind, LibraryKind::Album | LibraryKind::Show) {
             PlaylistSource::Context {
                 uri: entry.uri.clone(),
                 name: entry.name,

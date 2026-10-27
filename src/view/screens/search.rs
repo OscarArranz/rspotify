@@ -2,12 +2,15 @@
 
 use futures::channel::oneshot;
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle,
+    App, AppContext, Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle,
     StatefulInteractiveElement, Styled, Window, div, img, prelude::FluentBuilder, px, rgb, svg,
 };
 
 use crate::lib::spotify::{NativeSpotify, SearchItem, SearchResults};
+use crate::router::StackRouterHandle;
+use crate::state::AppState;
 use crate::view::components::smooth_scroll::{ScrollAxis, SmoothScrollElement, SmoothScrollState};
+use crate::view::screens::artist::{ArtistScreen, ArtistSource};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SearchTab {
@@ -204,6 +207,9 @@ fn track_row(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl In
 fn album_card(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl IntoElement {
     let client = client.clone();
     let uri = item.uri.clone();
+    let title = item.title.clone();
+    let image = item.image.clone();
+    let is_artist = item.kind == "Artist";
     div()
         .id((item.kind, index))
         .w(px(148.0))
@@ -215,8 +221,12 @@ fn album_card(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl I
         .rounded(px(6.0))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(0x242424)))
-        .on_click(move |_, _, _| {
-            let _ = client.play_context(&uri);
+        .on_click(move |_, _, cx| {
+            if is_artist {
+                open_artist_profile(&uri, &title, image.clone(), cx);
+            } else {
+                let _ = client.play_context(&uri);
+            }
         })
         .child(artwork(&item.image, 128.0))
         .child(item.title.clone())
@@ -230,6 +240,25 @@ fn album_card(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl I
                     _ => format!("By {}", item.subtitle),
                 }),
         )
+}
+
+/// Open a dedicated artist profile from search without starting playback.
+fn open_artist_profile(uri: &str, name: &str, image: Option<String>, cx: &mut App) {
+    let Some(client) = cx
+        .try_global::<AppState>()
+        .and_then(AppState::spotify_client)
+    else {
+        return;
+    };
+    let Some(router) = cx.try_global::<StackRouterHandle>().cloned() else {
+        return;
+    };
+    if router.current_source(cx) == Some(uri) {
+        return;
+    }
+    let source = ArtistSource::new(uri.to_string(), name.to_string(), image);
+    let screen = cx.new(|cx| ArtistScreen::new(source, client, cx));
+    router.push_for_source(screen.into(), uri.to_string(), cx);
 }
 
 impl Render for SearchScreen {
@@ -287,7 +316,10 @@ impl Render for SearchScreen {
                 |content| {
                     let item = self.results.top_result.clone().expect("checked above");
                     let top_uri = item.uri.clone();
+                    let top_title = item.title.clone();
+                    let top_image = item.image.clone();
                     let top_is_song = matches!(item.kind, "Song" | "Episode");
+                    let top_is_artist = item.kind == "Artist";
                     let client = client.clone();
                     content
                         .child(
@@ -309,8 +341,15 @@ impl Render for SearchScreen {
                                 .hover(|style| style.bg(rgb(0x333333)))
                                 .on_click({
                                     let client = client.clone();
-                                    move |_, _, _| {
-                                        if top_is_song {
+                                    move |_, _, cx| {
+                                        if top_is_artist {
+                                            open_artist_profile(
+                                                &top_uri,
+                                                &top_title,
+                                                top_image.clone(),
+                                                cx,
+                                            );
+                                        } else if top_is_song {
                                             let _ = client.play_track(&top_uri);
                                         } else {
                                             let _ = client.play_context(&top_uri);

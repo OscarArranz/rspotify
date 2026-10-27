@@ -17,6 +17,7 @@ use librespot::playback::{
 };
 use serde_json::Value;
 
+use super::artist::{self, ArtistProfile};
 use super::error::SpotifyError;
 use super::playlist::{self, PlaylistDetail, PlaylistPage, PlaylistSource};
 use super::search::{self, SearchResults};
@@ -482,6 +483,17 @@ impl NativeSpotify {
         self.inner
             .runtime
             .block_on(playlist::fetch_playlist_detail(&self.inner.session, source))
+    }
+
+    /// Fetches an artist's profile overview.
+    ///
+    /// Must be called from a background worker: it blocks the calling thread on the
+    /// Pathfinder request. The returned profile keeps every section independent so a
+    /// missing or malformed section does not invalidate the rest of the page.
+    pub fn artist_profile(&self, uri: &str) -> Result<ArtistProfile, SpotifyError> {
+        self.inner
+            .runtime
+            .block_on(artist::fetch_artist_profile(&self.inner.session, uri))
     }
 
     pub fn cached_playlist_detail(&self, source: &PlaylistSource) -> Option<PlaylistDetail> {
@@ -1676,5 +1688,73 @@ mod tests {
                 .filter(|playlist| playlist.image_url.is_some())
                 .count()
         );
+    }
+
+    #[test]
+    #[ignore = "requires read-only Spotify account/network approval"]
+    fn smoke_native_artist_profile() {
+        use super::super::library::LibraryKind;
+
+        let client = NativeSpotify::authenticate().expect("native login");
+        let catalog = client.library_catalog();
+        let limit = std::env::var("RSPOTIFY_ARTIST_PROBE_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1);
+        let artists: Vec<_> = catalog
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == LibraryKind::Artist)
+            .take(limit)
+            .collect();
+        if artists.is_empty() {
+            eprintln!("no saved artist available for the read-only profile probe");
+            return;
+        }
+
+        for (index, entry) in artists.iter().enumerate() {
+            let profile = client
+                .artist_profile(&entry.uri)
+                .expect("native artist overview");
+            assert_eq!(profile.uri, entry.uri);
+            assert!(!profile.name.is_empty());
+            assert_eq!(
+                profile.name, entry.name,
+                "overview name did not match the library name"
+            );
+
+            let counts = [
+                ("popular", profile.popular_tracks.len()),
+                ("liked", usize::from(profile.liked_music.is_some())),
+                ("pick", usize::from(profile.artist_pick.is_some())),
+                ("discography-popular", profile.discography.popular.len()),
+                ("discography-albums", profile.discography.albums.len()),
+                ("discography-singles", profile.discography.singles.len()),
+                (
+                    "discography-compilations",
+                    profile.discography.compilations.len(),
+                ),
+                ("featuring", profile.featuring.len()),
+                ("videos", profile.music_videos.len()),
+                ("concerts", profile.concerts.len()),
+                ("merch", profile.merchandise.len()),
+                ("discovered-on", profile.discovered_on.len()),
+                ("related-artists", profile.related_artists.len()),
+                ("appears-on", profile.appears_on.len()),
+            ];
+            eprintln!(
+                "native artist #{index}: verified={}, header={}, avatar={}, \
+                 monthly-listeners={}, followers={}, rank={}, following={:?}",
+                profile.verified,
+                profile.header_image_url.is_some(),
+                profile.avatar_image_url.is_some(),
+                profile.monthly_listeners.is_some(),
+                profile.followers.is_some(),
+                profile.world_rank.is_some(),
+                profile.following,
+            );
+            eprintln!("native artist #{index} sections: {counts:?}");
+        }
+        // Read-only: no playback, follow, or other account mutation is sent.
     }
 }
