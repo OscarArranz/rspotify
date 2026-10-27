@@ -415,7 +415,10 @@ impl LibrarySidebar {
             visible.retain(|&index| filter.matches(self.entries[index].kind));
         }
         if self.filter == Some(Filter::Playlists) {
-            visible.retain(|&index| self.ownership.matches(&self.entries[index], username));
+            visible.retain(|&index| {
+                self.ownership
+                    .keeps_in_playlists(&self.entries[index], username)
+            });
         }
         if self.reverse_sort {
             // Keep the collection at the top, independent of the direction of normal entries.

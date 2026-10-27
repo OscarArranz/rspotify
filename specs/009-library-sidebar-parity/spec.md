@@ -32,6 +32,8 @@ playback or account mutation controls may be invoked during inspection.
 - [ ] At matched scale and panel width, the surface, heading, circular add/expand controls,
   single-line overflow chips, search/sort toolbar, artwork, row spacing and truncation match Image 1.
 - [x] Liked Songs and saved entries share a virtualized scrolling list. Headers remain fixed.
+  Liked Songs is the fixed first row under every sort and under the Playlists filter, including
+  the ownership chips; account pin state never moves it.
 - [x] Search, category filters, sort/view picker, refresh, resizing, collapse/expand and folder
   navigation work; loading, empty, partial-data and error states are distinct.
 - [x] Rows show real owner metadata and available artwork, including album-art collages when a

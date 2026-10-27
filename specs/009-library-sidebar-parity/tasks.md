@@ -75,6 +75,9 @@ visual acceptance remain incomplete. Full 1:1 parity must not be claimed.
 - [x] Diagnose the metadata banner: catalog paging, recents, pins and decoration were healthy; one
   playlist returns 403 from `get_playlist`, and a single item-level miss was promoted to the global
   banner. Item-level misses now keep the rootlist fallback instead of raising it.
+- [x] Keep Liked Songs as the fixed first row: it leads every sort order (including Custom and
+  reverse sort) and stays visible under the Playlists filter, independent of saved pin state and
+  the ownership chips. Sort mode reorders only the entries below it.
 - [ ] User re-check of the normal-view toolbar at matched scale.
 
 - [x] Merge origin/main without discarding the pending library work or existing untracked `qq`.

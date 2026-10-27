@@ -74,8 +74,12 @@ impl LibraryEntry {
         }
     }
 
+    /// Whether the row sorts above ordinary library entries.
+    ///
+    /// Liked Songs is a fixed first row in the desktop client, not an account pin, so it stays on
+    /// top even when the saved pin state (`ylpin`) does not contain `spotify:collection:tracks`.
     pub(crate) fn pin_priority(&self) -> bool {
-        self.pinned.unwrap_or(self.kind == LibraryKind::LikedSongs)
+        self.kind == LibraryKind::LikedSongs || self.pinned.unwrap_or(false)
     }
 
     pub(crate) fn pin_uri(&self) -> String {
@@ -555,9 +559,11 @@ pub fn visible_entries(
     visible.sort_by(|&a, &b| {
         let a = &entries[a];
         let b = &entries[b];
-        // Liked Songs is a special collection, not fabricated account pin state.
-        (!a.pin_priority())
-            .cmp(&(!b.pin_priority()))
+        // Liked Songs is a fixed first row, independent of sort order and account pin state.
+        // Pins follow it, then the requested ordering with a stable tie-break.
+        (a.kind != LibraryKind::LikedSongs)
+            .cmp(&(b.kind != LibraryKind::LikedSongs))
+            .then_with(|| (!a.pin_priority()).cmp(&(!b.pin_priority())))
             .then_with(|| match sort {
                 LibrarySort::Custom => std::cmp::Ordering::Equal,
                 LibrarySort::Recents => b
@@ -613,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn real_pin_state_overrides_the_initial_collection_fallback() {
+    fn real_pin_state_sorts_pins_but_never_moves_liked_songs_off_the_top() {
         let mut decoder = RootlistDecoder::default();
         decoder.append(&page(&["spotify:playlist:a", "spotify:playlist:b"]));
         let mut entries = decoder.entries;
@@ -626,9 +632,40 @@ mod tests {
         entries[2].last_played_at = Some(100);
         assert_eq!(
             visible_entries(&entries, "", None, LibrarySort::Recents),
-            vec![1, 0, 2]
+            vec![2, 1, 0]
         );
         assert_eq!(entries[2].pin_uri(), "spotify:collection:tracks");
+    }
+
+    #[test]
+    fn liked_songs_leads_every_sort_even_when_its_name_sorts_last() {
+        let mut decoder = RootlistDecoder::default();
+        decoder.append(&page(&["spotify:playlist:a", "spotify:playlist:b"]));
+        let mut entries = decoder.entries;
+        entries.push(LibraryEntry::liked_songs("fixture-account"));
+        let liked = entries.len() - 1;
+        for (index, entry) in entries.iter_mut().enumerate() {
+            entry.name = format!("Zulu {index}");
+            entry.owner = format!("Owner {index}");
+            entry.added_at = Some(10 * index as i64);
+            entry.last_played_at = Some(10 * index as i64);
+            // An explicit unpinned state must not reorder the fixed row.
+            entry.pinned = Some(index != liked);
+        }
+        entries[liked].name = "Alpha Liked Songs".into();
+        for sort in [
+            LibrarySort::Custom,
+            LibrarySort::Recents,
+            LibrarySort::RecentlyAdded,
+            LibrarySort::Alphabetical,
+            LibrarySort::Creator,
+        ] {
+            assert_eq!(
+                visible_entries(&entries, "", None, sort).first(),
+                Some(&liked),
+                "Liked Songs must lead {sort:?}"
+            );
+        }
     }
     use librespot::protocol::playlist4_external::{Item, ItemAttributes, ListItems, MetaItem};
 

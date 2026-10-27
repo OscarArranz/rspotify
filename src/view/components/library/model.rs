@@ -105,6 +105,12 @@ impl Ownership {
             Self::BySpotify => entry.owner_username.eq_ignore_ascii_case("spotify"),
         }
     }
+
+    /// Membership in the Playlists view. Liked Songs is the fixed first row there, so the
+    /// ownership chips narrow the other playlists but never hide it.
+    pub fn keeps_in_playlists(self, entry: &LibraryEntry, username: &str) -> bool {
+        entry.kind == LibraryKind::LikedSongs || self.matches(entry, username)
+    }
 }
 
 /// Return original UTF-8 byte ranges, including Unicode lowercase expansions (İ -> i + dot).
@@ -174,5 +180,21 @@ mod tests {
         assert!(!Ownership::ByYou.matches(&entry, "other-account"));
         entry.owner_username = "spotify".into();
         assert!(Ownership::BySpotify.matches(&entry, "fixture-account"));
+    }
+
+    #[test]
+    fn playlists_view_always_keeps_liked_songs() {
+        let liked = LibraryEntry::liked_songs("fixture-account");
+        let mut playlist = LibraryEntry::liked_songs("fixture-account");
+        playlist.kind = LibraryKind::Playlist;
+        playlist.owner_username = "fixture-account".into();
+        assert!(Filter::Playlists.matches(liked.kind));
+        for ownership in [Ownership::All, Ownership::ByYou, Ownership::BySpotify] {
+            assert!(ownership.keeps_in_playlists(&liked, "fixture-account"));
+            assert_eq!(
+                ownership.keeps_in_playlists(&playlist, "fixture-account"),
+                ownership != Ownership::BySpotify
+            );
+        }
     }
 }

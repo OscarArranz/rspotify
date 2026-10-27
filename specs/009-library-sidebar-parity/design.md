@@ -77,7 +77,10 @@ without destroying its state and gives the library the available width. The coll
 its add action and restores the previous uncollapsed mode.
 
 One virtual list contains the toolbar followed by Liked Songs and typed library entries; only the
-heading/chips stay fixed. Switching filters/search/sort/folders
+heading/chips stay fixed. Liked Songs is a fixed first row: it leads every sort order, survives
+reverse sort and account pin state, and remains visible under the Playlists filter regardless of
+the ownership chip. Sort mode reorders only the entries below it. Switching
+filters/search/sort/folders
 rebuilds visible identities and resets scroll; playback updates redraw without resetting scroll.
 Images use rounded squares and artists use circles. Expanded and collapsed modes share
 the same state and entries; normal width is retained when temporarily collapsed/expanded.
