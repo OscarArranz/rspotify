@@ -24,6 +24,11 @@ These instructions apply to all coding agents and contributors working in this r
 
 Follow spec-driven development (SDD) for feature work and architectural refactors.
 
+Before starting work on a feature or bugfix, bring the working branch up to date with the latest
+available `main`. Check whether the local `main` or its upstream tracking branch is ahead, fetch the
+upstream when possible, and incorporate the most up-to-date `main` changes into the working branch.
+Preserve existing work; do not overwrite uncommitted changes or resolve conflicts by discarding them.
+
 1. **Spec first.** Before coding, create or update the next numbered
    `specs/NNN-short-name/` directory with `spec.md`, `design.md`, and `tasks.md`.
 2. **Read before editing.** Read the relevant spec and design before changing code. If a request
