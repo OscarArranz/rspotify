@@ -135,3 +135,6 @@ The playback test starts audio. Pause or stop playback and do not leave the app 
 - `specs/009-library-sidebar-parity/` — library panel redesign and native playlist/folder metadata.
   Native saved categories, bounded Recents, pin state and explicit pin commands implemented;
   account-write checks, creation/editing/drag organization and visual parity pending.
+- `specs/010-home-screen/` — native personalized Home feed, category chips, shelves and muted
+  Canvas recommendation panels. Read-only feed and headless decoding verified; actual desktop
+  visuals, playback actions and separate announcement/feedback integration remain pending.

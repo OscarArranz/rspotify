@@ -477,6 +477,22 @@ impl NativeSpotify {
             .collect())
     }
 
+    pub(crate) fn home(&self, facet: &str) -> Result<super::home::HomeFeed, SpotifyError> {
+        self.inner
+            .runtime
+            .block_on(super::home::fetch(&self.inner.session, facet))
+    }
+
+    pub(crate) fn home_section(
+        &self,
+        uri: &str,
+        offset: u64,
+    ) -> Result<(Vec<super::home::HomeItem>, Option<u64>), SpotifyError> {
+        self.inner
+            .runtime
+            .block_on(super::home::section(&self.inner.session, uri, offset))
+    }
+
     /// Fetches a saved playlist, or the current user's Liked Songs, plus its first context page.
     pub fn playlist_detail(&self, source: PlaylistSource) -> Result<PlaylistDetail, SpotifyError> {
         self.inner
@@ -1592,6 +1608,40 @@ mod tests {
             playlist.uri.starts_with("spotify:playlist:") && !playlist.name.is_empty()
         }));
         eprintln!("playback: {:#?}", client.playback());
+    }
+
+    #[test]
+    #[ignore = "requires saved session and read-only account/network access"]
+    fn smoke_native_home_schema() {
+        let client = NativeSpotify::restore().expect("saved native session");
+        let home = client.home("").expect("Home feed");
+        assert!(!home.shortcuts.is_empty());
+        assert!(!home.shelves.is_empty());
+        eprintln!(
+            "Home: {} shortcuts, {} shelves, {} chips, {} Canvas URLs",
+            home.shortcuts.len(),
+            home.shelves.len(),
+            home.chips.len(),
+            home.panels.iter().filter(|p| p.video_url.is_some()).count()
+        );
+        let shelf = home.shelves.first().expect("shelf");
+        let (items, next) = client.home_section(&shelf.uri, 0).expect("full shelf");
+        assert!(!items.is_empty());
+        eprintln!(
+            "Full shelf: {} items, next page: {}",
+            items.len(),
+            next.is_some()
+        );
+        if let Some(offset) = next {
+            let (_, after) = client
+                .home_section(&shelf.uri, offset)
+                .expect("next shelf page");
+            assert!(after.is_none_or(|after| after > offset));
+        }
+        for chip in home.chips {
+            let filtered = client.home(&chip.id).expect("category feed");
+            eprintln!("Category: {} shelves", filtered.shelves.len());
+        }
     }
 
     #[test]

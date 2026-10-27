@@ -9,6 +9,7 @@
 mod client;
 mod collection;
 mod error;
+pub(crate) mod home;
 pub(crate) mod library;
 pub(crate) mod library_catalog;
 mod playlist;

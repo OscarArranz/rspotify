@@ -6,6 +6,9 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 
 - **Native login**: OAuth against `accounts.spotify.com` using Spotify's desktop client id, then a native session over `login5.spotify.com` via librespot.
 - **Native search**: persisted GraphQL queries against Spotify's Pathfinder endpoint (`api-partner.spotify.com/pathfinder/v1/query`), the same service the official desktop and web clients use.
+- **Personalized Home**: native category chips, recent shortcuts, ordered recommendation shelves,
+  full-shelf pagination, hover play controls and recommendation panels with muted Canvas previews.
+  Playlist, album, artist and podcast cards open native detail/context pages.
 - **Local playback**: registers as a Spotify Connect device (`rspotify`) and streams through librespot to the default audio output.
 - **Persistent session**: the refresh token, stable device id, and cached profile details are stored in `~/.cache/rspotify/`. Returning users see the app immediately while the session refreshes in the background; the browser login is only needed once.
 - **Playlist detail**: saved playlists and Liked Songs open in a Spotify-style page with a large header, virtualized track list, local search, sort, and context playback.
@@ -28,6 +31,7 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 | Native OAuth login + refresh | Implemented |
 | Native session (login5/keymaster) | Implemented via librespot |
 | Search (all / songs / artists / albums / playlists / podcasts) | Implemented |
+| Personalized Home | Feed, category filters, shelves and muted Canvas panels implemented; visual parity pending |
 | Local playback (play / pause / next / previous / seek / volume) | Implemented |
 | User library sidebar | Native categories, Recents, filters, four layouts and pin commands; full parity pending |
 | Playlist detail + Liked Songs page | Implemented; visual and real-account checks pending |
@@ -41,6 +45,16 @@ Pinning currently follows the installed desktop client's default four-item limit
 universal backend limit. Pin/unpin writes and exact visual parity still need validation. Some rich
 playlist labels (such as "Made for" / mixed playlists) remain unavailable. See
 [`specs/009-library-sidebar-parity/`](specs/009-library-sidebar-parity/).
+
+Home uses the sections available to the account, so its content and order can differ from
+Spotify screenshots. Canvas panels preview returned recommendations; when Spotify doesn't
+provide baseline panels, up to three returned album/playlist recommendations are used.
+Hover previews are muted, six-second bounded loops and use an **optional `ffmpeg` executable**
+on `PATH`; without it, artwork remains visible. No protected music-video/episode manifests,
+audio preview mixing, save/feedback mutations or announcement-service integration are implemented.
+Spotlight/promotion sections with supported content have a featured layout, but full announcement
+banner/menu parity and real-desktop visual checks remain pending. See
+[`specs/010-home-screen/`](specs/010-home-screen/).
 
 ## Requirements
 
@@ -122,6 +136,7 @@ src/
 │   ├── library_catalog.rs      # saved categories, batched decoration and pins
 │   ├── collection.rs           # native collection-v2 paging and explicit pin writes
 │   ├── search.rs               # Pathfinder persisted-query search
+│   ├── home.rs                 # native Home feed, shelf paging and Canvas metadata
 │   ├── store.rs                # device id + refresh token persistence
 │   └── error.rs                # unified error type
 ├── router/                     # path + stack navigation

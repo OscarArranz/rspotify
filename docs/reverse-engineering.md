@@ -17,6 +17,51 @@ services instead of the public Web API.
 
 ## Endpoints observed in the official client
 
+### Home investigation (partial)
+
+REA extracted the installed `xpui.spa` (evidence
+`ev_5c9eba9f0fa305449c0c3d58c705861a3c72c06d38bb8ba15ac7c97176093686`)
+and statically analyzed `home-v2.js`, `home-v2-section.js`, and `home-subfeed.js`
+(`ev_a724d11521da35e6a56e39fc76b0686c407fa615f7b2a5403f1d1a8458e15fb9`).
+The latter refers to `HomeResponsePayload`, section collections, multiple section
+types, and paginated section items. That initial analysis was partial: 245 JavaScript
+files were not analyzed. The following V8-snapshot pass resolved the feed and Canvas
+lookup requests; it did not establish the separate announcement service.
+
+#### V8 snapshot follow-up
+
+The installed `v8_context_snapshot.bin` has SHA-256
+`6e6b6907557acead6858f70a8471ec27f6ee5b1c674c0b90b37395ab165dac25`.
+Its main modules include UTF-16LE source, explaining why ordinary searches of the
+route bundles missed the request definition. A read-only byte scan recovered module
+2481 (Home query definitions), 19690 (query variables), and 5028 (integration enums).
+These were wrapped as inert object literals for REA static inspection, not executed
+or presented as a complete snapshot decompilation. REA evidence:
+`ev_d690afaa37ab2877fcf02fb356bc0f434682779a5b6a179327c073f44695052a`.
+The local investigation bundle was exported to `/tmp/opencode/spotify-home-evidence.json`.
+
+| Operation | Persisted SHA-256 | Variables |
+| --- | --- | --- |
+| `home` | `76243c78b0e20ecdbe41b794dec8cbe73f75e585b0a7201b8d2e84578412847a` | `homeEndUserIntegration`, `timeZone`, `sp_t`, `facet`, `sectionItemsLimit`, `includeEpisodeContentRatingsV2` |
+| `homeSection` | same as `home`, as shipped in module 2481 | `uri`, desktop integration/timezone, `sectionItemsOffset`, `sectionItemsLimit`, content-rating flag |
+| `feedBaselineLookup` | `a950fb7c4ecdcaf2aad2f3ca9ee9c3aa4b9c43c97e1d07d05148c4d355bea7fc` | `uris` |
+
+The preview lookup definition and its consumers are in `2774.js`. It decorates
+album/playlist `previewItems.items[].data.canvas` with `url`, `type`, `fileId`,
+`uri`, and thumbnail sources. Episode previews use manifest file IDs instead;
+those are **not** treated as direct unprotected video URLs.
+
+With explicit permission, read-only native requests confirmed the Home payload,
+three category feeds, full-shelf lookup and Canvas metadata. The validation run
+returned 9 supported shortcuts, 20 shelves, 3 chips and 2 direct Canvas sources;
+these counts are observations, not fixed API guarantees. A separate headless test
+downloaded and decoded one Canvas to 48 muted frames without starting playback.
+Only schema information/counts were logged, not names, URIs, tokens or URLs.
+Account smoke tests must run sequentially: simultaneous session restores can race
+refresh-token rotation. The initial concurrent decoder test failed authentication;
+its sequential rerun passed. Full audio playback, account writes, announcement
+integration and actual desktop visuals were not validated.
+
 ### Authentication / session
 
 - `https://accounts.spotify.com/authorize`

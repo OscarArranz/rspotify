@@ -134,6 +134,11 @@ impl StackRouter {
         self.current_screen > 0
     }
 
+    pub fn go_home(&mut self, cx: &mut Context<Self>) {
+        self.current_screen = 0;
+        cx.notify();
+    }
+
     /// Returns true if we can go forward (more than one screen).
     pub fn can_go_forward(&self) -> bool {
         self.current_screen + 1 < self.screens.len()
@@ -180,6 +185,9 @@ pub struct StackRouterHandle {
 impl gpui::Global for StackRouterHandle {}
 
 impl StackRouterHandle {
+    pub fn go_home(&self, cx: &mut App) {
+        self.router.update(cx, |router, cx| router.go_home(cx));
+    }
     pub fn new(router: Entity<StackRouter>) -> Self {
         Self { router }
     }

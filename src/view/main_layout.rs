@@ -13,38 +13,9 @@ use crate::state::AppState;
 use crate::view::components::library::{LibrarySidebar, LibrarySize};
 use crate::view::components::render_cache::{cached_bar, cached_fill};
 use crate::view::components::resizable::{ResizableState, h_resizable, resizable_panel};
+use crate::view::screens::home::HomeScreen;
 
 const PANEL_MARGIN: f32 = 8.0;
-
-/// A simple home screen to show inside the stack router.
-pub struct HomeScreen;
-
-impl Render for HomeScreen {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex().h_full().child(
-            div()
-                .flex()
-                .flex_col()
-                .bg(rgb(0x121212))
-                .rounded_lg()
-                .gap_4()
-                .size_full()
-                .justify_center()
-                .items_center()
-                .child(
-                    div()
-                        .text_2xl()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .child("Welcome to Spotify!"),
-                )
-                .child(
-                    div()
-                        .text_color(rgb(0xb3b3b3))
-                        .child("Search for music and press play. Playback requires Premium."),
-                ),
-        )
-    }
-}
 
 /// Main layout containing the stack router, library and player bar.
 pub struct MainLayout {
@@ -63,7 +34,7 @@ pub struct MainLayout {
 impl MainLayout {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Create the stack router with HomeScreen as initial screen
-        let home = cx.new(|_| HomeScreen);
+        let home = cx.new(HomeScreen::new);
         let stack_router = cx.new(|_| StackRouter::with_initial(home.into()));
 
         // Register stack router globally so child components can navigate

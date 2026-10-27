@@ -1,13 +1,12 @@
 //! Home button component.
 
 use gpui::{
-    App, AppContext, Entity, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    App, Entity, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled, Window, div, px, rgb,
 };
 
 use crate::router::StackRouterHandle;
 use crate::view::components::icons::home_icon;
-use crate::view::main_layout::HomeScreen;
 
 use super::BUTTON_HOVER_BG;
 
@@ -35,8 +34,7 @@ pub fn home_button(window: &mut Window, cx: &mut App) -> impl IntoElement {
         .cursor_pointer()
         .on_click(move |_, _, cx| {
             if let Some(nav) = cx.try_global::<StackRouterHandle>().cloned() {
-                let home = cx.new(|_| HomeScreen);
-                nav.reset(home.into(), cx);
+                nav.go_home(cx);
             }
         })
         .on_hover(move |hovered, _window, cx| {
