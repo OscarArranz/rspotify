@@ -7,7 +7,9 @@ use gpui::{
     prelude::FluentBuilder, px, relative, rgb, svg,
 };
 
-use crate::lib::spotify::{NativeSpotify, PlaybackSnapshot};
+use crate::lib::spotify::{
+    LibraryPlaylist, NativeSpotify, PlaybackSnapshot, PlaylistSource, RepeatMode,
+};
 use crate::router::{StackRouter, StackRouterHandle};
 use crate::state::AppState;
 use crate::view::components::library::{LibrarySidebar, LibrarySize};
@@ -179,6 +181,8 @@ struct PlayerBar {
     dragging: Option<SliderDrag>,
     optimistic_seek: Option<OptimisticSeek>,
     optimistic_volume: Option<OptimisticVolume>,
+    optimistic_shuffle: Option<OptimisticToggle>,
+    optimistic_repeat: Option<OptimisticRepeat>,
     last_nonzero_volume: u8,
 }
 
@@ -190,6 +194,16 @@ struct OptimisticSeek {
 
 struct OptimisticVolume {
     target_percent: u8,
+    started_at: Instant,
+}
+
+struct OptimisticToggle {
+    value: bool,
+    started_at: Instant,
+}
+
+struct OptimisticRepeat {
+    mode: RepeatMode,
     started_at: Instant,
 }
 
@@ -258,8 +272,46 @@ impl PlayerBar {
             dragging: None,
             optimistic_seek: None,
             optimistic_volume: None,
+            optimistic_shuffle: None,
+            optimistic_repeat: None,
             last_nonzero_volume,
         }
+    }
+
+    fn current_shuffle(&self) -> bool {
+        self.optimistic_shuffle
+            .as_ref()
+            .map(|pending| pending.value)
+            .unwrap_or(self.playback.shuffle)
+    }
+
+    fn current_repeat(&self) -> RepeatMode {
+        self.optimistic_repeat
+            .as_ref()
+            .map(|pending| pending.mode)
+            .unwrap_or(self.playback.repeat)
+    }
+
+    fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
+        let target = !self.current_shuffle();
+        if self.client.set_shuffle(target).is_ok() {
+            self.optimistic_shuffle = Some(OptimisticToggle {
+                value: target,
+                started_at: Instant::now(),
+            });
+        }
+        cx.notify();
+    }
+
+    fn cycle_repeat(&mut self, cx: &mut Context<Self>) {
+        let mode = self.current_repeat().next();
+        if self.client.set_repeat_mode(mode).is_ok() {
+            self.optimistic_repeat = Some(OptimisticRepeat {
+                mode,
+                started_at: Instant::now(),
+            });
+        }
+        cx.notify();
     }
 }
 
@@ -284,8 +336,30 @@ impl Render for PlayerBar {
         }) {
             self.optimistic_volume = None;
         }
+        if self.optimistic_shuffle.as_ref().is_some_and(|pending| {
+            now.duration_since(pending.started_at) >= Duration::from_secs(3)
+                || self.playback.shuffle == pending.value
+        }) {
+            self.optimistic_shuffle = None;
+        }
+        if self.optimistic_repeat.as_ref().is_some_and(|pending| {
+            now.duration_since(pending.started_at) >= Duration::from_secs(3)
+                || self.playback.repeat == pending.mode
+        }) {
+            self.optimistic_repeat = None;
+        }
 
         let playing = self.playback.is_playing;
+        let shuffle = self
+            .optimistic_shuffle
+            .as_ref()
+            .map(|pending| pending.value)
+            .unwrap_or(self.playback.shuffle);
+        let repeat = self
+            .optimistic_repeat
+            .as_ref()
+            .map(|pending| pending.mode)
+            .unwrap_or(self.playback.repeat);
         let track = self.playback.now_playing.clone();
         let position = self
             .optimistic_seek
@@ -485,19 +559,18 @@ impl Render for PlayerBar {
                             .flex()
                             .items_center()
                             .gap(px(18.0))
+                            .child(transport_toggle_button(
+                                "shuffle-toggle",
+                                "icons/shuffle.svg",
+                                shuffle,
+                                cx.listener(|this, _, _, cx| this.toggle_shuffle(cx)),
+                            ))
                             .child(icon_control_button(
                                 "icons/previous.svg",
                                 move |client| {
                                     let _ = client.previous();
                                 },
                                 prev_client,
-                            ))
-                            .child(control_button(
-                                "↺10",
-                                move |client| {
-                                    let _ = client.seek(position.saturating_sub(10_000));
-                                },
-                                client.clone(),
                             ))
                             .child(
                                 div()
@@ -526,19 +599,22 @@ impl Render for PlayerBar {
                                             .text_color(rgb(0x000000)),
                                     ),
                             )
-                            .child(control_button(
-                                "↻10",
-                                move |client| {
-                                    let _ = client.seek(position.saturating_add(10_000));
-                                },
-                                client.clone(),
-                            ))
                             .child(icon_control_button(
                                 "icons/next.svg",
                                 move |client| {
                                     let _ = client.next();
                                 },
                                 next_client,
+                            ))
+                            .child(transport_toggle_button(
+                                "repeat-toggle",
+                                if matches!(repeat, RepeatMode::Track) {
+                                    "icons/repeat-one.svg"
+                                } else {
+                                    "icons/repeat.svg"
+                                },
+                                repeat.is_active(),
+                                cx.listener(|this, _, _, cx| this.cycle_repeat(cx)),
                             )),
                     )
                     .child(
@@ -667,18 +743,26 @@ impl Render for PlayerBar {
     }
 }
 
-fn control_button(
-    label: &'static str,
-    action: impl Fn(&NativeSpotify) + 'static,
-    client: NativeSpotify,
+fn transport_toggle_button(
+    id: &'static str,
+    path: &'static str,
+    active: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    let color = if active { rgb(0x1ed760) } else { rgb(0xb3b3b3) };
+    let hover_color = if active { rgb(0x3be477) } else { rgb(0xffffff) };
     div()
-        .id(label)
+        .id(id)
         .cursor_pointer()
-        .text_color(rgb(0xd9d9d9))
-        .hover(|style| style.text_color(rgb(0xffffff)))
-        .on_click(move |_, _, _| action(&client))
-        .child(label)
+        .p(px(4.0))
+        .on_click(on_click)
+        .child(
+            svg()
+                .path(path)
+                .size(px(16.0))
+                .text_color(color)
+                .hover(move |style| style.text_color(hover_color)),
+        )
 }
 
 fn icon_control_button(

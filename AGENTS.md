@@ -143,3 +143,5 @@ The playback test starts audio. Pause or stop playback and do not leave the app 
 - `specs/010-home-screen/` — native personalized Home feed, category chips, shelves and muted
   Canvas recommendation panels. Read-only feed and headless decoding verified; actual desktop
   visuals, playback actions and separate announcement/feedback integration remain pending.
+- `specs/009-player-bar-transport-controls/` — Spotify-style shuffle, previous, play/pause, next,
+  and repeat transport row. Implemented; real-account and visual validation pending.
