@@ -28,6 +28,7 @@ use gpui::{
 /// ```
 pub struct StackRouter {
     screens: Vec<AnyView>,
+    source_uris: Vec<Option<String>>,
     current_screen: usize,
 }
 
@@ -36,6 +37,7 @@ impl StackRouter {
     pub fn new() -> Self {
         Self {
             screens: Vec::new(),
+            source_uris: Vec::new(),
             current_screen: 0,
         }
     }
@@ -44,6 +46,7 @@ impl StackRouter {
     pub fn with_initial(initial: AnyView) -> Self {
         Self {
             screens: vec![initial],
+            source_uris: vec![None],
             current_screen: 0,
         }
     }
@@ -51,15 +54,24 @@ impl StackRouter {
     /// Pushes a new screen onto the stack.
     /// Similar to React Navigation's navigation.push().
     pub fn push(&mut self, screen: AnyView, cx: &mut Context<Self>) {
+        self.push_for_source(screen, None, cx);
+    }
+
+    pub fn push_for_source(
+        &mut self,
+        screen: AnyView,
+        source: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.current_screen + 1 < self.screens.len() {
             self.screens.truncate(self.current_screen + 1);
+            self.source_uris.truncate(self.current_screen + 1);
         }
 
         self.screens.push(screen);
+        self.source_uris.push(source);
 
-        if self.screens.len() > 0 {
-            self.current_screen += 1;
-        }
+        self.current_screen = self.screens.len() - 1;
 
         cx.notify();
     }
@@ -93,8 +105,10 @@ impl StackRouter {
     pub fn replace(&mut self, screen: AnyView, cx: &mut Context<Self>) {
         if let Some(slot) = self.screens.get_mut(self.current_screen) {
             *slot = screen;
+            self.source_uris[self.current_screen] = None;
         } else {
             self.screens.push(screen);
+            self.source_uris.push(None);
             self.current_screen = self.screens.len().saturating_sub(1);
         }
         cx.notify();
@@ -105,6 +119,7 @@ impl StackRouter {
     pub fn reset(&mut self, screen: AnyView, cx: &mut Context<Self>) {
         self.screens.clear();
         self.screens.push(screen);
+        self.source_uris = vec![None];
         self.current_screen = 0;
         cx.notify();
     }
@@ -117,6 +132,11 @@ impl StackRouter {
     /// Returns true if we can go back (more than one screen).
     pub fn can_go_back(&self) -> bool {
         self.current_screen > 0
+    }
+
+    pub fn go_home(&mut self, cx: &mut Context<Self>) {
+        self.current_screen = 0;
+        cx.notify();
     }
 
     /// Returns true if we can go forward (more than one screen).
@@ -165,6 +185,9 @@ pub struct StackRouterHandle {
 impl gpui::Global for StackRouterHandle {}
 
 impl StackRouterHandle {
+    pub fn go_home(&self, cx: &mut App) {
+        self.router.update(cx, |router, cx| router.go_home(cx));
+    }
     pub fn new(router: Entity<StackRouter>) -> Self {
         Self { router }
     }
@@ -218,5 +241,19 @@ impl StackRouterHandle {
     /// Gets the underlying Entity for direct access.
     pub fn entity(&self) -> Entity<StackRouter> {
         self.router.clone()
+    }
+
+    pub fn push_for_source(&self, screen: AnyView, uri: String, cx: &mut App) {
+        self.router.update(cx, |router, cx| {
+            router.push_for_source(screen, Some(uri), cx)
+        });
+    }
+
+    pub fn current_source<'a>(&'a self, cx: &'a App) -> Option<&'a str> {
+        let router = self.router.read(cx);
+        router
+            .source_uris
+            .get(router.current_screen)
+            .and_then(|uri| uri.as_deref())
     }
 }

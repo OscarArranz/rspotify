@@ -25,9 +25,9 @@ invalidate a running panel's icon-loader cache. No desktop restart or Flatpak re
 | --- | --- |
 | `src/lib/spotify/client.rs` | OAuth with desktop client id, session store handoff, librespot `Session`/`Spirc`/`Player`, Connect device registration, rootlist/profile fetches, playback commands and snapshot |
 | `src/lib/spotify/search.rs` | Pathfinder request and `searchV2` response parser |
-| `src/lib/spotify/store.rs` | Refresh token and stable device id persistence with private permissions |
+| `src/lib/spotify/store.rs` | Refresh token, stable device id, and cached non-secret profile persistence with private permissions |
 | `src/lib/spotify/error.rs` | Unified auth/session/api/playback/storage error type |
-| `src/state/app_state.rs` | Global authenticated `NativeSpotify` handle |
+| `src/state/app_state.rs` | Global authenticated client plus optimistic cached profile/restoration state |
 | `src/view/screens/sign_in/` | Sign-in screen and non-blocking login trigger |
 | `src/view/components/titlebar/` | Authenticated controls, search entry point, avatar, navigation |
 | `src/view/screens/search.rs` | Search tabs, result rendering, stale-request handling, click-to-play |
@@ -46,22 +46,28 @@ invalidate a running panel's icon-loader cache. No desktop restart or Flatpak re
 
 ## Authentication flow
 
-1. `SignInButton` starts a worker thread calling `NativeSpotify::authenticate()`.
-2. `SessionStore::load()` reads `session.json`; `ensure_device_id()` generates a 128-bit hex id on
+1. At startup, `SessionStore::load()` reads `session.json`. If it contains a refresh token, the
+   router starts at `/main`, seeds `AppState` with cached profile details when available, and starts
+   `NativeSpotify::restore()` on a worker thread. This is an optimistic UI state, not an active
+   authenticated client; API actions remain unavailable until restoration completes.
+2. `ensure_device_id()` generates a 128-bit hex id on
    first run.
-3. `OAuthClientBuilder` opens `accounts.spotify.com` with the desktop client id, loopback redirect,
-   and desktop scopes.
-4. If a refresh token exists, it is refreshed first. A rejected token falls back to the interactive
-   browser flow. A successful response updates the stored refresh token.
-5. The access token is handed to `NativeSpotify::connect`:
+3. Startup restore refreshes the saved token without opening a browser. A confirmed invalid-grant
+   response clears the refresh token and navigates to `/sign-in`; network/transport/session errors
+   leave the cached profile and main layout intact; startup restoration is attempted again on the
+   next app launch. Explicit sign-in retains the browser OAuth path.
+4. On successful restore/sign-in, update the refresh token and hand the access token to
+   `NativeSpotify::connect`:
    - build a two-worker Tokio runtime,
    - create the librespot cache under the state directory,
    - construct `Session` inside `runtime.enter()` because librespot captures the current runtime
      handle,
    - create `Player` with the selected audio backend and `SoftMixer`,
    - create `Spirc` with device name `rspotify` and device type `Computer`, then spawn its task.
-6. The UI stores the returned handle in `AppState`, observes the global, and navigates to `/main`.
-   The titlebar's global observer updates its controls without requiring a restart.
+5. Fetch the current profile off-thread when possible, persist its display name and avatar URL, and
+   publish both the client and profile through `AppState`. `MainLayout` observes global state and
+   initializes its library/player once the client becomes available. The titlebar displays cached
+   profile details immediately and updates them after restoration.
 
 The loopback listener and browser interaction stay inside `OAuthClientBuilder`; the app does not
 implement its own HTTP callback server.
@@ -119,9 +125,17 @@ position, volume, shuffle, and repeat. A dedicated runtime task consumes `Player
 - position events update the last known position,
 - volume/shuffle/repeat events update their fields.
 
-Each event records `updated_at`. `NativeSpotify::playback` clones the snapshot and extrapolates the
+Position-bearing events record `updated_at`; metadata-only updates leave the clock intact.
+Local loading/playing/paused events own transport state until stopped or unavailable, preventing
+stale Connect polling from overwriting the local clock (see spec 003's clock-ownership design).
+`NativeSpotify::playback` clones the snapshot and extrapolates the
 position by the elapsed time while playing, clamped to the track duration. This keeps the progress
 bar smooth without querying Spotify.
+
+The Connect poller hydrates remote-device metadata only. When the active device is rspotify, local
+player events own metadata and timing; the server snapshot can lag automatic track transitions.
+After asynchronous metadata hydration, recheck both the current server track URI and active device
+before applying the result, so an in-flight remote fetch cannot overwrite resumed local playback.
 
 `PlayerBar` polls the snapshot from a background timer and re-renders only on changes. It sends
 play/pause, previous/next, seek, and volume commands directly to `NativeSpotify`.
@@ -152,7 +166,7 @@ play/pause, previous/next, seek, and volume commands directly to `NativeSpotify`
 
 ## Security and privacy
 
-- `session.json` contains the refresh token. It is written through a temporary file, chmod `0600`
+- `session.json` contains the refresh token, device id, display name, and avatar URL. It is written through a temporary file, chmod `0600`
   on Unix, then renamed; the state directory is chmod `0700`.
 - Access tokens live only in memory and are never rendered or written to logs.
 - Errors from OAuth/Pathfinder are displayed without dumping credential payloads.
@@ -170,7 +184,7 @@ play/pause, previous/next, seek, and volume commands directly to `NativeSpotify`
 | Pathfinder rejects the token | Use login5 auth token, not keymaster; surface a clear error |
 | Blocking work freezes the UI | Worker threads + `oneshot`; `Session` under `runtime.enter()` |
 | Playback requires Premium | Document requirement; do not attempt a DRM or premium bypass |
-| No auto-login may surprise returning users | Keep the explicit login button and reuse the stored refresh token |
+| Startup refresh fails temporarily | Retain cached profile and main layout; don't treat transport failure as invalid credentials |
 
 ## Validation strategy
 

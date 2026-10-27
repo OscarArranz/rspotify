@@ -8,21 +8,19 @@ use librespot::connect::{ConnectConfig, LoadRequest, LoadRequestOptions, Playing
 use librespot::core::{
     Session, SessionConfig, authentication::Credentials, cache::Cache, config::DeviceType,
 };
-use librespot::oauth::OAuthClientBuilder;
+use librespot::oauth::{OAuthClientBuilder, OAuthError};
 use librespot::playback::{
     audio_backend,
     config::{AudioFormat, PlayerConfig},
     mixer::{Mixer, MixerConfig, softmixer::SoftMixer},
     player::{Player, PlayerEvent},
 };
-use librespot::protocol::playlist4_external::SelectedListContent;
-use protobuf::Message;
 use serde_json::Value;
 
 use super::error::SpotifyError;
 use super::playlist::{self, PlaylistDetail, PlaylistPage, PlaylistSource};
 use super::search::{self, SearchResults};
-use super::store::SessionStore;
+use super::store::{SessionStore, StoredProfile};
 
 /// Spotify's own desktop client id. The same id is used by librespot for keymaster
 /// requests and is allowed to use the loopback OAuth redirect below.
@@ -125,6 +123,59 @@ pub struct LibraryPlaylist {
 struct PlaybackInner {
     snapshot: PlaybackSnapshot,
     updated_at: Instant,
+    local_player_active: bool,
+}
+
+impl PlaybackInner {
+    fn snapshot_at(&self, now: Instant) -> PlaybackSnapshot {
+        let mut snapshot = self.snapshot.clone();
+        if snapshot.is_playing {
+            let elapsed = now.duration_since(self.updated_at).as_millis() as u64;
+            snapshot.position_ms = snapshot.position_ms.saturating_add(elapsed);
+            if let Some(track) = &snapshot.now_playing {
+                if track.duration_ms > 0 {
+                    snapshot.position_ms = snapshot.position_ms.min(track.duration_ms);
+                }
+            }
+        }
+        snapshot
+    }
+
+    fn apply_connect_state(
+        &mut self,
+        remote: &librespot::connect::RemotePlayerState,
+        local_device_id: &str,
+        now: Instant,
+    ) {
+        if self.local_player_active {
+            return;
+        }
+        if remote.track_uri.is_empty() {
+            if remote.active_device_id != local_device_id {
+                self.snapshot.now_playing = None;
+                self.snapshot.is_playing = false;
+                self.snapshot.position_ms = 0;
+                self.snapshot.context_uri = None;
+                self.updated_at = now;
+            }
+            return;
+        }
+        if self
+            .snapshot
+            .now_playing
+            .as_ref()
+            .is_some_and(|track| track.uri == remote.track_uri)
+        {
+            if remote.active_device_id != local_device_id {
+                self.snapshot.is_playing = false;
+                self.snapshot.position_ms = remote.position_ms;
+                self.updated_at = now;
+            }
+            if !remote.context_uri.is_empty() {
+                self.snapshot.context_uri = Some(remote.context_uri.clone());
+            }
+        }
+    }
 }
 
 struct NativeInner {
@@ -144,6 +195,21 @@ pub struct NativeSpotify {
 }
 
 impl NativeSpotify {
+    pub fn cached_profile() -> Option<UserProfile> {
+        SessionStore::load().profile().map(|profile| UserProfile {
+            name: profile.name.clone(),
+            image_url: profile.image_url.clone(),
+        })
+    }
+
+    pub fn has_restorable_session() -> bool {
+        SessionStore::load().has_restorable_session()
+    }
+
+    pub fn clear_saved_refresh_token() {
+        SessionStore::load().clear_refresh_token();
+    }
+
     /// Performs the interactive desktop OAuth flow and connects a librespot session.
     ///
     /// This is blocking and must run on a background thread. It opens the user's
@@ -152,23 +218,14 @@ impl NativeSpotify {
     pub fn authenticate() -> Result<Self, SpotifyError> {
         let mut store = SessionStore::load();
         let device_id = store.ensure_device_id();
-
-        let client_id =
-            std::env::var("RSPOTIFY_NATIVE_CLIENT_ID").unwrap_or_else(|_| NATIVE_CLIENT_ID.into());
-        let redirect_uri =
-            std::env::var("RSPOTIFY_REDIRECT_URI").unwrap_or_else(|_| NATIVE_REDIRECT_URI.into());
-
-        let oauth = OAuthClientBuilder::new(&client_id, &redirect_uri, OAUTH_SCOPES.to_vec())
-            .open_in_browser()
-            .with_custom_message(OAUTH_SUCCESS_HTML)
-            .build()?;
+        let (client_id, oauth) = oauth_client(true)?;
 
         // Reuse a stored refresh token when possible, otherwise show the browser flow.
         let mut token = match store.refresh_token() {
             Some(refresh) => match oauth.refresh_token(refresh) {
                 Ok(token) => token,
-                Err(error) => {
-                    eprintln!("stored Spotify session expired ({error}); signing in again");
+                Err(_) => {
+                    eprintln!("stored Spotify session was rejected; starting interactive sign-in");
                     oauth.get_access_token()?
                 }
             },
@@ -184,13 +241,51 @@ impl NativeSpotify {
             store.set_refresh_token(&token.refresh_token);
         }
 
-        Self::connect(token.access_token, device_id, client_id)
+        let initial_volume = store.volume_percent();
+        Self::connect(token.access_token, device_id, client_id, initial_volume)
+    }
+
+    /// Restores a saved session without opening a browser. Must run off the GPUI thread.
+    pub fn restore() -> Result<Self, SpotifyError> {
+        let mut store = SessionStore::load();
+        let refresh = store
+            .refresh_token()
+            .ok_or_else(|| SpotifyError::Auth("no saved refresh token".into()))?
+            .to_owned();
+        let device_id = store.ensure_device_id();
+        let (client_id, oauth) = oauth_client(false)?;
+        let token = oauth.refresh_token(&refresh).map_err(|error| {
+            if is_rejected_refresh(&error) {
+                SpotifyError::InvalidRefreshToken
+            } else {
+                SpotifyError::OAuth(error.to_string())
+            }
+        })?;
+        let refresh_token = if token.refresh_token.is_empty() {
+            refresh
+        } else {
+            token.refresh_token
+        };
+        store.set_refresh_token(&refresh_token);
+        let initial_volume = store.volume_percent();
+        Self::connect(token.access_token, device_id, client_id, initial_volume)
+    }
+
+    /// Fetch and persist the current profile. Profile fetch failure is non-fatal.
+    pub fn persist_profile(&self) -> Option<UserProfile> {
+        let profile = self.user_profile().ok()?;
+        SessionStore::load().set_profile(StoredProfile {
+            name: profile.name.clone(),
+            image_url: profile.image_url.clone(),
+        });
+        Some(profile)
     }
 
     fn connect(
         access_token: String,
         device_id: String,
         client_id: String,
+        initial_volume: u8,
     ) -> Result<Self, SpotifyError> {
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -226,6 +321,9 @@ impl NativeSpotify {
 
         let credentials = Credentials::with_access_token(access_token);
         let mixer = Arc::new(SoftMixer::open(MixerConfig::default())?);
+        let initial_volume = initial_volume.min(100);
+        let initial_volume_value = (initial_volume as u32 * u16::MAX as u32 / 100) as u16;
+        mixer.set_volume(initial_volume_value);
         let player_config = PlayerConfig {
             position_update_interval: Some(Duration::from_millis(500)),
             ..Default::default()
@@ -241,7 +339,7 @@ impl NativeSpotify {
         let connect_config = ConnectConfig {
             name: CONNECT_DEVICE_NAME.to_string(),
             device_type: DeviceType::Computer,
-            initial_volume: 50 * (u16::MAX / 100),
+            initial_volume: initial_volume_value,
             ..Default::default()
         };
 
@@ -258,10 +356,15 @@ impl NativeSpotify {
         runtime.spawn(spirc_task);
 
         let playback = Arc::new(Mutex::new(PlaybackInner {
-            snapshot: PlaybackSnapshot::default(),
+            snapshot: PlaybackSnapshot {
+                volume_percent: initial_volume,
+                ..PlaybackSnapshot::default()
+            },
             updated_at: Instant::now(),
+            local_player_active: false,
         }));
         spawn_player_event_loop(&runtime, &player, playback.clone());
+        spawn_connect_state_event_loop(&runtime, &spirc, &session, playback.clone());
 
         let username = session.username();
         // Authentication already runs on a worker. Decode the collection here so opening
@@ -284,6 +387,43 @@ impl NativeSpotify {
 
     pub fn username(&self) -> &str {
         &self.inner.username
+    }
+
+    /// Blocking native library fetch; callers must run this on a worker.
+    pub fn library_entries(&self) -> Result<Vec<super::library::LibraryEntry>, SpotifyError> {
+        self.inner
+            .runtime
+            .block_on(super::library::fetch(&self.inner.session))
+    }
+
+    pub(crate) fn library_catalog(&self) -> super::library_catalog::LibrarySupplement {
+        self.inner
+            .runtime
+            .block_on(super::library_catalog::fetch(&self.inner.session))
+    }
+
+    /// Blocking account mutation; only explicit user Pin/Unpin actions may invoke this worker API.
+    pub(crate) fn set_library_pinned(
+        &self,
+        uri: &str,
+        pinned: bool,
+    ) -> Result<std::collections::HashSet<String>, SpotifyError> {
+        self.inner.runtime.block_on(super::collection::set_pinned(
+            &self.inner.session,
+            uri,
+            pinned,
+        ))
+    }
+
+    /// Enrich a small visible batch without holding up the first library render.
+    pub(crate) fn hydrate_library_entries(
+        &self,
+        entries: &mut [super::library::LibraryEntry],
+        cache: &mut super::library::LibraryHydrator,
+    ) -> usize {
+        self.inner
+            .runtime
+            .block_on(super::library::hydrate(&self.inner.session, entries, cache))
     }
 
     /// Searches Spotify's own Pathfinder endpoint. Blocking; call from a worker thread.
@@ -324,81 +464,33 @@ impl NativeSpotify {
     /// official client decodes). Playlist names and artwork come from the decorated
     /// `meta_items` that accompany each rootlist entry.
     pub fn library_playlists(&self) -> Result<Vec<LibraryPlaylist>, SpotifyError> {
-        self.inner.runtime.block_on(async {
-            let mut playlists = Vec::new();
-            let mut from = 0usize;
-            let page_size = 100usize;
+        Ok(self
+            .library_entries()?
+            .into_iter()
+            .filter(|entry| entry.kind == super::library::LibraryKind::Playlist)
+            .map(|entry| LibraryPlaylist {
+                uri: entry.uri,
+                name: entry.name,
+                owner: entry.owner,
+                image_url: entry.image_url,
+            })
+            .collect())
+    }
 
-            loop {
-                let bytes = self
-                    .inner
-                    .session
-                    .spclient()
-                    .get_rootlist(from, Some(page_size))
-                    .await
-                    .map_err(|error| SpotifyError::Api(error.to_string()))?;
-                let list = SelectedListContent::parse_from_bytes(&bytes)
-                    .map_err(|error| SpotifyError::Api(error.to_string()))?;
+    pub(crate) fn home(&self, facet: &str) -> Result<super::home::HomeFeed, SpotifyError> {
+        self.inner
+            .runtime
+            .block_on(super::home::fetch(&self.inner.session, facet))
+    }
 
-                let Some(contents) = list.contents.as_ref() else {
-                    break;
-                };
-                if contents.items.is_empty() {
-                    break;
-                }
-
-                for (index, item) in contents.items.iter().enumerate() {
-                    let uri = item.uri.clone().unwrap_or_default();
-                    if !uri.starts_with("spotify:playlist:") {
-                        continue;
-                    }
-                    let attributes = contents
-                        .meta_items
-                        .get(index)
-                        .and_then(|meta| meta.attributes.as_ref());
-                    let name = attributes
-                        .and_then(|attributes| attributes.name.clone())
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or_else(|| "Playlist".to_string());
-                    let image_url = attributes.and_then(|attributes| {
-                        let from_sizes = attributes
-                            .picture_size
-                            .iter()
-                            .filter(|size| size.url.as_deref().is_some_and(|url| !url.is_empty()))
-                            .max_by_key(|size| {
-                                size.target_name
-                                    .as_deref()
-                                    .unwrap_or("")
-                                    .parse::<u32>()
-                                    .unwrap_or(0)
-                            })
-                            .map(|size| image_url_from_id(size.url.as_deref().unwrap_or("")))
-                            .filter(|url| !url.is_empty());
-                        from_sizes.or_else(|| {
-                            attributes
-                                .picture
-                                .as_deref()
-                                .and_then(image_url_from_picture)
-                        })
-                    });
-
-                    playlists.push(LibraryPlaylist {
-                        uri,
-                        name,
-                        owner: String::new(),
-                        image_url,
-                    });
-                }
-
-                from += contents.items.len();
-                let total = list.length().max(0) as usize;
-                if from >= total {
-                    break;
-                }
-            }
-
-            Ok(playlists)
-        })
+    pub(crate) fn home_section(
+        &self,
+        uri: &str,
+        offset: u64,
+    ) -> Result<(Vec<super::home::HomeItem>, Option<u64>), SpotifyError> {
+        self.inner
+            .runtime
+            .block_on(super::home::section(&self.inner.session, uri, offset))
     }
 
     /// Fetches a saved playlist, or the current user's Liked Songs, plus its first context page.
@@ -440,20 +532,7 @@ impl NativeSpotify {
     /// A consistent snapshot of local playback, with position extrapolated to now.
     pub fn playback(&self) -> PlaybackSnapshot {
         let inner = self.inner.playback.lock().unwrap();
-        let mut snapshot = inner.snapshot.clone();
-        if snapshot.is_playing {
-            let elapsed = inner.updated_at.elapsed().as_millis() as u64;
-            let duration = snapshot
-                .now_playing
-                .as_ref()
-                .map(|track| track.duration_ms)
-                .unwrap_or(0);
-            snapshot.position_ms = snapshot.position_ms.saturating_add(elapsed);
-            if duration > 0 {
-                snapshot.position_ms = snapshot.position_ms.min(duration);
-            }
-        }
-        snapshot
+        inner.snapshot_at(Instant::now())
     }
 
     /// Plays a single track URI, making this client the active Connect device.
@@ -519,16 +598,50 @@ impl NativeSpotify {
     }
 
     pub fn play_pause(&self) -> Result<(), SpotifyError> {
-        self.inner
-            .spirc
-            .play_pause()
-            .map_err(|error| SpotifyError::Playback(error.to_string()))
+        let snapshot = self.playback();
+        if snapshot.is_playing {
+            self.inner
+                .spirc
+                .play_pause()
+                .map_err(|error| SpotifyError::Playback(error.to_string()))
+        } else {
+            self.start_snapshot_playback(snapshot)
+        }
     }
 
     pub fn play(&self) -> Result<(), SpotifyError> {
+        self.start_snapshot_playback(self.playback())
+    }
+
+    fn start_snapshot_playback(&self, snapshot: PlaybackSnapshot) -> Result<(), SpotifyError> {
+        let Some(track) = snapshot.now_playing else {
+            return self
+                .inner
+                .spirc
+                .play()
+                .map_err(|error| SpotifyError::Playback(error.to_string()));
+        };
+
+        let options = LoadRequestOptions {
+            start_playing: true,
+            seek_to: snapshot.position_ms.min(u32::MAX as u64) as u32,
+            playing_track: Some(PlayingTrack::Uri(track.uri.clone())),
+            ..Default::default()
+        };
+        let request = match snapshot.context_uri {
+            Some(context_uri) if !context_uri.is_empty() => {
+                LoadRequest::from_context_uri(context_uri, options)
+            }
+            _ => LoadRequest::from_tracks(vec![track.uri], options),
+        };
+
         self.inner
             .spirc
-            .play()
+            .activate()
+            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
+        self.inner
+            .spirc
+            .load(request)
             .map_err(|error| SpotifyError::Playback(error.to_string()))
     }
 
@@ -566,6 +679,8 @@ impl NativeSpotify {
             .spirc
             .set_volume(value)
             .map_err(|error| SpotifyError::Playback(error.to_string()))?;
+        let mut store = SessionStore::load();
+        store.set_volume_percent(percent.min(100));
         let mut playback = self.inner.playback.lock().unwrap();
         playback.snapshot.volume_percent = percent.min(100);
         Ok(())
@@ -602,80 +717,248 @@ fn spawn_player_event_loop(
     runtime.spawn(async move {
         while let Some(event) = events.recv().await {
             let mut inner = playback.lock().unwrap();
-            match event {
-                PlayerEvent::TrackChanged { audio_item } => {
-                    let (artists, album) = match &audio_item.unique_fields {
-                        librespot::metadata::audio::UniqueFields::Track {
-                            artists, album, ..
-                        } => (
-                            artists
-                                .iter()
-                                .map(|artist| artist.name.clone())
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                            album.clone(),
-                        ),
-                        librespot::metadata::audio::UniqueFields::Episode { show_name, .. } => {
-                            (show_name.clone(), "Episode".to_string())
-                        }
-                        librespot::metadata::audio::UniqueFields::Local {
-                            artists, album, ..
-                        } => (
-                            artists.clone().unwrap_or_default(),
-                            album.clone().unwrap_or_default(),
-                        ),
-                    };
-                    inner.snapshot.now_playing = Some(NowPlaying {
-                        uri: audio_item.uri.clone(),
-                        title: audio_item.name.clone(),
-                        artists,
-                        album,
-                        cover_url: audio_item.covers.first().map(|cover| cover.url.clone()),
-                        duration_ms: audio_item.duration_ms as u64,
-                    });
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Playing { position_ms, .. } => {
-                    inner.snapshot.is_playing = true;
-                    inner.snapshot.position_ms = position_ms as u64;
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Paused { position_ms, .. } => {
-                    inner.snapshot.is_playing = false;
-                    inner.snapshot.position_ms = position_ms as u64;
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Seeked { position_ms, .. }
-                | PlayerEvent::PositionCorrection { position_ms, .. }
-                | PlayerEvent::PositionChanged { position_ms, .. } => {
-                    inner.snapshot.position_ms = position_ms as u64;
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Loading { position_ms, .. } => {
-                    inner.snapshot.position_ms = position_ms as u64;
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Stopped { .. } => {
-                    inner.snapshot.is_playing = false;
-                    inner.snapshot.position_ms = 0;
-                    inner.updated_at = Instant::now();
-                }
-                PlayerEvent::Unavailable { .. } => {
-                    inner.snapshot.is_playing = false;
-                }
-                PlayerEvent::VolumeChanged { volume } => {
-                    inner.snapshot.volume_percent = ((volume as u32 * 100) / u16::MAX as u32) as u8;
-                }
-                PlayerEvent::ShuffleChanged { shuffle } => {
-                    inner.snapshot.shuffle = shuffle;
-                }
-                PlayerEvent::RepeatChanged { context, .. } => {
-                    inner.snapshot.repeat = context;
-                }
-                _ => {}
-            }
+            apply_player_event(&mut inner, event, Instant::now());
         }
     });
+}
+
+fn apply_player_event(inner: &mut PlaybackInner, event: PlayerEvent, now: Instant) {
+    match event {
+        PlayerEvent::TrackChanged { audio_item } => {
+            let (artists, album) = match &audio_item.unique_fields {
+                librespot::metadata::audio::UniqueFields::Track { artists, album, .. } => (
+                    artists
+                        .iter()
+                        .map(|artist| artist.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    album.clone(),
+                ),
+                librespot::metadata::audio::UniqueFields::Episode { show_name, .. } => {
+                    (show_name.clone(), "Episode".to_string())
+                }
+                librespot::metadata::audio::UniqueFields::Local { artists, album, .. } => (
+                    artists.clone().unwrap_or_default(),
+                    album.clone().unwrap_or_default(),
+                ),
+            };
+            inner.snapshot.now_playing = Some(NowPlaying {
+                uri: audio_item.uri.clone(),
+                title: audio_item.name.clone(),
+                artists,
+                album,
+                cover_url: audio_item.covers.first().map(|cover| cover.url.clone()),
+                duration_ms: audio_item.duration_ms as u64,
+            });
+        }
+        PlayerEvent::Playing { position_ms, .. } => {
+            inner.local_player_active = true;
+            inner.snapshot.is_playing = true;
+            inner.snapshot.position_ms = position_ms as u64;
+            inner.updated_at = now;
+        }
+        PlayerEvent::Paused { position_ms, .. } => {
+            inner.local_player_active = true;
+            inner.snapshot.is_playing = false;
+            inner.snapshot.position_ms = position_ms as u64;
+            inner.updated_at = now;
+        }
+        PlayerEvent::Seeked { position_ms, .. }
+        | PlayerEvent::PositionCorrection { position_ms, .. }
+        | PlayerEvent::PositionChanged { position_ms, .. } => {
+            inner.snapshot.position_ms = position_ms as u64;
+            inner.updated_at = now;
+        }
+        PlayerEvent::Loading { position_ms, .. } => {
+            inner.local_player_active = true;
+            inner.snapshot.is_playing = false;
+            inner.snapshot.position_ms = position_ms as u64;
+            inner.updated_at = now;
+        }
+        PlayerEvent::Stopped { .. } => {
+            inner.local_player_active = false;
+            inner.snapshot.is_playing = false;
+            inner.snapshot.position_ms = 0;
+            inner.snapshot.now_playing = None;
+            inner.updated_at = now;
+        }
+        PlayerEvent::Unavailable { .. } => {
+            inner.local_player_active = false;
+            inner.snapshot.position_ms = inner.snapshot_at(now).position_ms;
+            inner.updated_at = now;
+            inner.snapshot.is_playing = false;
+        }
+        PlayerEvent::VolumeChanged { volume } => {
+            inner.snapshot.volume_percent = ((volume as u32 * 100) / u16::MAX as u32) as u8;
+        }
+        PlayerEvent::ShuffleChanged { shuffle } => {
+            inner.snapshot.shuffle = shuffle;
+        }
+        PlayerEvent::RepeatChanged { context, .. } => {
+            inner.snapshot.repeat = context;
+        }
+        _ => {}
+    }
+}
+
+fn spawn_connect_state_event_loop(
+    runtime: &Arc<tokio::runtime::Runtime>,
+    spirc: &Spirc,
+    session: &Session,
+    playback: Arc<Mutex<PlaybackInner>>,
+) {
+    let spirc = spirc.clone();
+    let session = session.clone();
+    runtime.spawn(async move {
+        let mut resolved_uri = String::new();
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let Some(remote) = spirc.remote_player_state() else {
+                continue;
+            };
+
+            // Connect can still describe the previous device during a local handoff.
+            // The player event stream owns transport state until it stops.
+            if remote.active_device_id == session.device_id()
+                || playback.lock().unwrap().local_player_active
+            {
+                resolved_uri.clear();
+                continue;
+            }
+
+            if remote.track_uri.is_empty() {
+                if remote.active_device_id != session.device_id() {
+                    let mut inner = playback.lock().unwrap();
+                    inner.apply_connect_state(&remote, session.device_id(), Instant::now());
+                    resolved_uri.clear();
+                }
+                continue;
+            }
+
+            let current_uri = playback
+                .lock()
+                .unwrap()
+                .snapshot
+                .now_playing
+                .as_ref()
+                .map(|track| track.uri.clone());
+            if current_uri.as_deref() != Some(remote.track_uri.as_str())
+                && resolved_uri != remote.track_uri
+            {
+                resolved_uri = remote.track_uri.clone();
+                let metadata = playlist::fetch_track_metadata(&session, &remote.track_uri)
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(now_playing) = now_playing_from_remote(&remote, metadata) {
+                    let mut inner = playback.lock().unwrap();
+                    // A newer server update or local player event may have arrived while
+                    // metadata was being fetched; only apply a still-current server item.
+                    if let Some(latest) = spirc.remote_player_state() {
+                        apply_remote_now_playing(
+                            &mut inner,
+                            &latest,
+                            session.device_id(),
+                            now_playing,
+                        );
+                    }
+                }
+            }
+
+            // Refresh after the possible await above before updating remote timing/context.
+            let Some(remote) = spirc.remote_player_state() else {
+                continue;
+            };
+            if remote.active_device_id == session.device_id() {
+                resolved_uri.clear();
+                continue;
+            }
+            let mut inner = playback.lock().unwrap();
+            inner.apply_connect_state(&remote, session.device_id(), Instant::now());
+        }
+    });
+}
+
+fn apply_remote_now_playing(
+    inner: &mut PlaybackInner,
+    remote: &librespot::connect::RemotePlayerState,
+    local_device_id: &str,
+    now_playing: NowPlaying,
+) {
+    // Hydration may finish after the server changes tracks or playback returns locally.
+    if remote.active_device_id == local_device_id
+        || inner.local_player_active
+        || remote.track_uri != now_playing.uri
+    {
+        return;
+    }
+    inner.snapshot.now_playing = Some(now_playing);
+    inner.snapshot.context_uri =
+        (!remote.context_uri.is_empty()).then_some(remote.context_uri.clone());
+}
+
+fn now_playing_from_remote(
+    remote: &librespot::connect::RemotePlayerState,
+    hydrated: Option<playlist::HydratedTrack>,
+) -> Option<NowPlaying> {
+    let title = hydrated
+        .as_ref()
+        .map(|metadata| metadata.title.clone())
+        .or_else(|| remote_metadata_value(remote, &["title", "name"]))?;
+    let artists = hydrated
+        .as_ref()
+        .map(|metadata| metadata.artist.clone())
+        .unwrap_or_else(|| {
+            remote_metadata_value(remote, &["artist", "artist_name", "artists"]).unwrap_or_default()
+        });
+    let album = hydrated
+        .as_ref()
+        .map(|metadata| metadata.album.clone())
+        .unwrap_or_else(|| {
+            remote_metadata_value(remote, &["album", "album_name"]).unwrap_or_default()
+        });
+    let cover_url = hydrated
+        .as_ref()
+        .and_then(|metadata| metadata.image_url.clone())
+        .or_else(|| {
+            remote_metadata_value(
+                remote,
+                &[
+                    "image_url",
+                    "image_uri",
+                    "album_image_url",
+                    "cover_url",
+                    "imageUrl",
+                ],
+            )
+            .map(|url| image_url_from_id(&url))
+            .filter(|url| !url.is_empty())
+        });
+
+    Some(NowPlaying {
+        uri: remote.track_uri.clone(),
+        title,
+        artists,
+        album,
+        cover_url,
+        duration_ms: hydrated
+            .as_ref()
+            .map(|metadata| metadata.duration_ms)
+            .filter(|duration| *duration > 0)
+            .unwrap_or(remote.duration_ms),
+    })
+}
+
+fn remote_metadata_value(
+    remote: &librespot::connect::RemotePlayerState,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter()
+        .find_map(|key| remote.metadata.get(*key))
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn image_from_json(value: &Value) -> Option<String> {
@@ -719,18 +1002,6 @@ fn image_url_from_id(id: &str) -> String {
     }
 }
 
-fn image_url_from_picture(bytes: &[u8]) -> Option<String> {
-    if bytes.len() != 20 {
-        return None;
-    }
-    let id = bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let url = image_url_from_id(&id);
-    (!url.is_empty()).then_some(url)
-}
-
 fn session_cache_dir() -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("RSPOTIFY_STATE_DIR") {
         return std::path::PathBuf::from(dir);
@@ -740,6 +1011,32 @@ fn session_cache_dir() -> std::path::PathBuf {
         .or_else(|_| std::env::var("HOME").map(|home| std::path::Path::new(&home).join(".cache")))
         .unwrap_or_else(|_| std::env::temp_dir());
     cache.join("rspotify")
+}
+
+fn oauth_client(
+    interactive: bool,
+) -> Result<(String, librespot::oauth::OAuthClient), SpotifyError> {
+    let client_id =
+        std::env::var("RSPOTIFY_NATIVE_CLIENT_ID").unwrap_or_else(|_| NATIVE_CLIENT_ID.into());
+    let redirect_uri =
+        std::env::var("RSPOTIFY_REDIRECT_URI").unwrap_or_else(|_| NATIVE_REDIRECT_URI.into());
+    let mut builder = OAuthClientBuilder::new(&client_id, &redirect_uri, OAUTH_SCOPES.to_vec());
+    if interactive {
+        builder = builder
+            .open_in_browser()
+            .with_custom_message(OAUTH_SUCCESS_HTML);
+    }
+    Ok((client_id, builder.build()?))
+}
+
+fn is_rejected_refresh(error: &OAuthError) -> bool {
+    match error {
+        OAuthError::ExchangeCode { e } => {
+            let normalized = e.to_ascii_lowercase();
+            normalized.contains("invalid_grant") || normalized.contains("invalid_token")
+        }
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
@@ -754,6 +1051,517 @@ fn restrict_private_dir(_path: &std::path::Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_TRACK_URI: &str = "spotify:track:0000000000000000000000";
+
+    fn playback_clock(now: Instant) -> PlaybackInner {
+        PlaybackInner {
+            snapshot: PlaybackSnapshot {
+                now_playing: Some(NowPlaying {
+                    uri: TEST_TRACK_URI.into(),
+                    duration_ms: 180_000,
+                    ..Default::default()
+                }),
+                position_ms: 60_000,
+                ..Default::default()
+            },
+            updated_at: now,
+            local_player_active: false,
+        }
+    }
+
+    fn test_track_id() -> librespot::core::SpotifyUri {
+        librespot::core::SpotifyUri::from_uri(TEST_TRACK_URI).unwrap()
+    }
+
+    #[test]
+    fn stale_connect_polls_cannot_rewind_local_playback() {
+        let start = Instant::now();
+        let mut inner = playback_clock(start);
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Playing {
+                play_request_id: 1,
+                track_id: test_track_id(),
+                position_ms: 60_000,
+            },
+            start,
+        );
+        let remote = librespot::connect::RemotePlayerState {
+            track_uri: TEST_TRACK_URI.into(),
+            active_device_id: "previous-spotify-device".into(),
+            position_ms: 12_000,
+            ..Default::default()
+        };
+        for tick in 1..=6 {
+            let now = start + Duration::from_millis(tick * 500);
+            inner.apply_connect_state(&remote, "rspotify-device", now);
+            let snapshot = inner.snapshot_at(now);
+            assert!(snapshot.is_playing);
+            assert_eq!(snapshot.position_ms, 60_000 + tick * 500);
+            apply_player_event(
+                &mut inner,
+                PlayerEvent::PositionChanged {
+                    play_request_id: 1,
+                    track_id: test_track_id(),
+                    position_ms: (60_000 + tick * 500) as u32,
+                },
+                now,
+            );
+            assert_eq!(
+                inner
+                    .snapshot_at(now + Duration::from_millis(250))
+                    .position_ms,
+                60_000 + tick * 500 + 250
+            );
+        }
+        // A stale empty remote selection must not clear the local track either.
+        inner.apply_connect_state(&Default::default(), "rspotify-device", start);
+        assert!(inner.snapshot.now_playing.is_some());
+    }
+
+    #[test]
+    fn local_connect_context_poll_does_not_reset_position_anchor() {
+        let start = Instant::now();
+        let mut inner = playback_clock(start);
+        inner.snapshot.is_playing = true;
+        let remote = librespot::connect::RemotePlayerState {
+            track_uri: TEST_TRACK_URI.into(),
+            active_device_id: "rspotify-device".into(),
+            context_uri: "spotify:playlist:example".into(),
+            ..Default::default()
+        };
+        for tick in 1..=6 {
+            let now = start + Duration::from_millis(tick * 500);
+            inner.apply_connect_state(&remote, "rspotify-device", now);
+            assert_eq!(inner.snapshot_at(now).position_ms, 60_000 + tick * 500);
+        }
+        assert_eq!(inner.updated_at, start);
+        assert_eq!(inner.snapshot.context_uri, Some(remote.context_uri));
+    }
+
+    #[test]
+    fn local_pause_and_backward_seek_remain_authoritative() {
+        let start = Instant::now();
+        let mut inner = playback_clock(start);
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Paused {
+                play_request_id: 1,
+                track_id: test_track_id(),
+                position_ms: 65_000,
+            },
+            start,
+        );
+        let remote = librespot::connect::RemotePlayerState {
+            track_uri: TEST_TRACK_URI.into(),
+            active_device_id: "previous-device".into(),
+            position_ms: 12_000,
+            ..Default::default()
+        };
+        let later = start + Duration::from_secs(2);
+        inner.apply_connect_state(&remote, "rspotify-device", later);
+        assert_eq!(inner.snapshot_at(later).position_ms, 65_000);
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Seeked {
+                play_request_id: 1,
+                track_id: test_track_id(),
+                position_ms: 10_000,
+            },
+            later,
+        );
+        assert_eq!(inner.snapshot_at(later).position_ms, 10_000);
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Playing {
+                play_request_id: 1,
+                track_id: test_track_id(),
+                position_ms: 10_000,
+            },
+            later,
+        );
+        inner.apply_connect_state(&remote, "rspotify-device", later);
+        assert_eq!(
+            inner
+                .snapshot_at(later + Duration::from_secs(1))
+                .position_ms,
+            11_000
+        );
+    }
+
+    #[test]
+    fn loading_claims_local_clock_and_stopping_releases_it() {
+        let start = Instant::now();
+        let mut inner = playback_clock(start);
+        inner.snapshot.is_playing = true;
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Loading {
+                play_request_id: 1,
+                track_id: test_track_id(),
+                position_ms: 20_000,
+            },
+            start,
+        );
+        assert!(inner.local_player_active);
+        assert!(!inner.snapshot.is_playing);
+        assert_eq!(
+            inner
+                .snapshot_at(start + Duration::from_secs(1))
+                .position_ms,
+            20_000
+        );
+        apply_player_event(
+            &mut inner,
+            PlayerEvent::Stopped {
+                play_request_id: 1,
+                track_id: test_track_id(),
+            },
+            start,
+        );
+        assert!(!inner.local_player_active);
+        let remote = librespot::connect::RemotePlayerState {
+            track_uri: TEST_TRACK_URI.into(),
+            active_device_id: "other-device".into(),
+            position_ms: 42_000,
+            metadata: [("title".into(), "Remote track".into())].into(),
+            ..Default::default()
+        };
+        inner.snapshot.now_playing = now_playing_from_remote(&remote, None);
+        inner.apply_connect_state(&remote, "rspotify-device", start);
+        assert_eq!(inner.snapshot.position_ms, 42_000);
+        assert!(!inner.snapshot.is_playing);
+    }
+
+    #[test]
+    fn extrapolated_playback_is_clamped_to_track_duration() {
+        let start = Instant::now();
+        let mut inner = playback_clock(start);
+        inner.snapshot.is_playing = true;
+        assert_eq!(
+            inner
+                .snapshot_at(start + Duration::from_secs(200))
+                .position_ms,
+            180_000
+        );
+    }
+
+    #[test]
+    fn stale_connect_metadata_cannot_replace_the_next_local_song() {
+        let next_song = NowPlaying {
+            uri: "spotify:track:next".into(),
+            title: "Next song".into(),
+            ..Default::default()
+        };
+        let snapshot = PlaybackSnapshot {
+            now_playing: Some(next_song),
+            is_playing: true,
+            position_ms: 250,
+            context_uri: Some("spotify:playlist:local".into()),
+            ..Default::default()
+        };
+        let mut inner = PlaybackInner {
+            snapshot: snapshot.clone(),
+            updated_at: Instant::now(),
+            local_player_active: true,
+        };
+        let updated_at = inner.updated_at;
+        let remote = librespot::connect::RemotePlayerState {
+            active_device_id: "rspotify-device".into(),
+            track_uri: "spotify:track:finished".into(),
+            ..Default::default()
+        };
+        let finished_song = NowPlaying {
+            uri: remote.track_uri.clone(),
+            title: "Finished song".into(),
+            ..Default::default()
+        };
+
+        // Also covers hydration started remotely but completed after local activation.
+        apply_remote_now_playing(&mut inner, &remote, "rspotify-device", finished_song);
+
+        assert_eq!(inner.snapshot, snapshot);
+        assert_eq!(inner.updated_at, updated_at);
+    }
+
+    #[test]
+    fn remote_hydration_applies_only_to_the_current_remote_song() {
+        let mut inner = PlaybackInner {
+            snapshot: PlaybackSnapshot::default(),
+            updated_at: Instant::now(),
+            local_player_active: false,
+        };
+        let remote = librespot::connect::RemotePlayerState {
+            active_device_id: "other-device".into(),
+            track_uri: "spotify:track:current".into(),
+            context_uri: "spotify:playlist:remote".into(),
+            ..Default::default()
+        };
+        let stale_song = NowPlaying {
+            uri: "spotify:track:previous".into(),
+            ..Default::default()
+        };
+        apply_remote_now_playing(&mut inner, &remote, "rspotify-device", stale_song);
+        assert_eq!(inner.snapshot, PlaybackSnapshot::default());
+
+        let current_song = NowPlaying {
+            uri: remote.track_uri.clone(),
+            title: "Current remote song".into(),
+            ..Default::default()
+        };
+        apply_remote_now_playing(&mut inner, &remote, "rspotify-device", current_song.clone());
+        assert_eq!(inner.snapshot.now_playing, Some(current_song));
+        assert_eq!(
+            inner.snapshot.context_uri.as_deref(),
+            Some(remote.context_uri.as_str())
+        );
+    }
+
+    #[test]
+    #[ignore = "requires read-only Spotify account/network approval"]
+    fn smoke_native_library_context_navigation() {
+        use super::super::library::LibraryKind;
+        let client = NativeSpotify::authenticate().expect("native login");
+        let catalog = client.library_catalog();
+        for kind in [LibraryKind::Album, LibraryKind::Artist, LibraryKind::Show] {
+            let Some(entry) = catalog.entries.iter().find(|entry| entry.kind == kind) else {
+                continue;
+            };
+            let detail = client
+                .playlist_detail(PlaylistSource::Context {
+                    uri: entry.uri.clone(),
+                    name: entry.name.clone(),
+                    owner: entry.owner.clone(),
+                    image_url: entry.image_url.clone(),
+                    kind: kind.label(),
+                })
+                .expect("native catalog context page");
+            assert_eq!(detail.context_uri, entry.uri);
+            assert_eq!(detail.name, entry.name);
+            assert!(detail.tracks.iter().all(|track| !track.uri.is_empty()));
+            eprintln!(
+                "native library {kind:?} context: {} loaded rows, has-next={}",
+                detail.tracks.len(),
+                detail.next_page_url.is_some()
+            );
+        }
+        // No playback or mutation commands are invoked.
+    }
+
+    #[test]
+    #[ignore = "requires read-only Spotify account/network approval"]
+    fn smoke_native_library_catalog() {
+        use super::super::library::LibraryKind;
+        let client = NativeSpotify::authenticate().expect("native login");
+        let mut entries = client.library_entries().expect("native rootlist");
+        let supplement = client.library_catalog();
+        assert_eq!(
+            supplement.failures, 0,
+            "native category/pin/decoration requests failed"
+        );
+        let (categories, _) = supplement.apply(&mut entries);
+        for kind in [LibraryKind::Album, LibraryKind::Artist, LibraryKind::Show] {
+            assert!(
+                categories.contains(&kind),
+                "category contract was not loaded"
+            );
+            let category: Vec<_> = entries.iter().filter(|e| e.kind == kind).collect();
+            assert!(
+                category
+                    .iter()
+                    .all(|e| !e.name.is_empty() && e.name != kind.label()),
+                "catalog names remained placeholders"
+            );
+            eprintln!(
+                "native library category {kind:?}: {} decorated entries",
+                category.len()
+            );
+        }
+        assert!(
+            entries.iter().all(|e| e.pinned.is_some()),
+            "pin membership was not loaded"
+        );
+        eprintln!("native library pin membership loaded successfully");
+        // Read-only: no playback, pin/unpin, creation or editing commands are sent.
+    }
+
+    #[test]
+    #[ignore = "requires read-only Spotify account/network approval"]
+    fn smoke_native_library_collection_contract() {
+        let client = NativeSpotify::authenticate().expect("native login");
+        for set in ["artist", "show", "ylpin", "collection", "prerelease"] {
+            let page = client
+                .inner
+                .runtime
+                .block_on(super::super::collection::page(
+                    &client.inner.session,
+                    set,
+                    "",
+                ))
+                .expect("native collection page");
+            let mut types = std::collections::BTreeMap::new();
+            let mut contexts = std::collections::BTreeMap::new();
+            for item in &page.items {
+                *types
+                    .entry(item.uri.split(':').nth(1).unwrap_or("unknown").to_string())
+                    .or_insert(0usize) += 1;
+                if let Some(context) = &item.context_uri {
+                    *contexts
+                        .entry(context.split(':').nth(1).unwrap_or("unknown").to_string())
+                        .or_insert(0usize) += 1;
+                }
+            }
+            eprintln!(
+                "native collection {set}: {} items, types={types:?}, context-types={contexts:?}, removed={}, has-next={}",
+                page.items.len(),
+                page.items.iter().filter(|i| i.removed).count(),
+                !page.next.is_empty()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires read-only Spotify account/network approval"]
+    fn smoke_native_library_recents_contract() {
+        let client = NativeSpotify::authenticate().expect("native login");
+        let response = client.inner.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(15), client.inner.session.spclient().request_as_json(
+                &reqwest::Method::GET,
+                "/recently-played/v3/recently-played?limit=50&filter=default,collection-new-episodes",
+                None, None,
+            )).await
+        });
+        let bytes = response
+            .expect("bounded recents request")
+            .expect("observed native recents endpoint");
+        let recents =
+            super::super::library::parse_recents(&bytes).expect("native recents protobuf");
+        assert!(!recents.is_empty(), "no native recents to validate");
+        assert!(
+            recents
+                .values()
+                .all(|timestamp| *timestamp > 100_000_000_000 && *timestamp < 10_000_000_000_000),
+            "native recency timestamps are not epoch milliseconds"
+        );
+        eprintln!(
+            "native recents protobuf: {} valid context/timestamp records",
+            recents.len()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an existing Spotify login and read-only network/account approval"]
+    fn smoke_native_library_sidebar() {
+        use super::super::library::{LibraryHydrator, LibraryKind};
+        assert!(
+            SessionStore::load().refresh_token().is_some(),
+            "Authorize rspotify before running this check"
+        );
+        let client = NativeSpotify::authenticate().expect("native login");
+        let entries = client.library_entries().expect("native library rootlist");
+        assert_eq!(
+            entries.first().map(|e| e.kind),
+            Some(LibraryKind::LikedSongs)
+        );
+        let identities: std::collections::HashSet<_> =
+            entries.iter().map(|e| e.uri.as_str()).collect();
+        assert_eq!(identities.len(), entries.len());
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !entry.name.is_empty() && !entry.uri.is_empty())
+        );
+        assert!(entries.iter().all(|entry| {
+            entry
+                .parent
+                .as_ref()
+                .is_none_or(|parent| identities.contains(parent.as_str()))
+        }));
+        let mut sample: Vec<_> = entries
+            .iter()
+            .filter(|e| e.kind != LibraryKind::Folder)
+            .take(4)
+            .cloned()
+            .collect();
+        let mut cache = LibraryHydrator::default();
+        let failures = client.hydrate_library_entries(&mut sample, &mut cache);
+        assert_eq!(
+            failures, 0,
+            "sampled native library metadata requests failed"
+        );
+        assert!(
+            sample.iter().all(|entry| !entry.owner.is_empty()),
+            "sampled playlist owners were not resolved"
+        );
+        let owners = sample.iter().filter(|e| !e.owner.is_empty()).count();
+        let covers = sample
+            .iter()
+            .filter(|e| e.image_url.is_some() || !e.covers.is_empty())
+            .count();
+        eprintln!(
+            "library sidebar: {} entries, {} folders; sample {} owners, {} covers, {} metadata failures",
+            entries.len(),
+            entries
+                .iter()
+                .filter(|e| e.kind == LibraryKind::Folder)
+                .count(),
+            owners,
+            covers,
+            failures
+        );
+        // No playback or mutation commands are sent by this test.
+    }
+
+    #[test]
+    #[ignore = "requires network and a user-approved native account session"]
+    fn smoke_native_library_diagnostics() {
+        use super::super::library::LibraryHydrator;
+        assert!(
+            SessionStore::load().refresh_token().is_some(),
+            "Authorize rspotify before running this check"
+        );
+        let client = NativeSpotify::restore().expect("native session restore");
+        let entries = client.library_entries().expect("native library rootlist");
+        eprintln!("diagnostics: rootlist entries={}", entries.len());
+        let catalog = client.library_catalog();
+        eprintln!(
+            "diagnostics: catalog failures={} recents_available={} categories={} pins={}",
+            catalog.failures,
+            catalog.recents_available,
+            catalog.loaded_categories.len(),
+            catalog.pins.as_ref().map(|p| p.len()).unwrap_or(0)
+        );
+        let mut cache = LibraryHydrator::default();
+        let mut failures = 0;
+        for entry in entries {
+            let mut batch = [entry];
+            failures += client.hydrate_library_entries(&mut batch, &mut cache);
+        }
+        eprintln!("diagnostics: per-entry hydrate failures={failures}");
+        // Read-only: no playback, pin, or library mutation is issued.
+    }
+
+    #[test]
+    fn builds_track_display_from_connect_server_metadata() {
+        let remote = librespot::connect::RemotePlayerState {
+            track_uri: "spotify:track:example".into(),
+            position_ms: 12_000,
+            metadata: [
+                ("title".into(), "Server track".into()),
+                ("artist_name".into(), "Server artist".into()),
+                ("album_name".into(), "Server album".into()),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        let track = now_playing_from_remote(&remote, None).expect("server metadata");
+        assert_eq!(track.uri, "spotify:track:example");
+        assert_eq!(track.title, "Server track");
+        assert_eq!(track.artists, "Server artist");
+        assert_eq!(track.album, "Server album");
+    }
 
     /// Manual smoke test. Requires a previously authorised account in
     /// `~/.cache/rspotify/session.json` and network access.
@@ -800,6 +1608,40 @@ mod tests {
             playlist.uri.starts_with("spotify:playlist:") && !playlist.name.is_empty()
         }));
         eprintln!("playback: {:#?}", client.playback());
+    }
+
+    #[test]
+    #[ignore = "requires saved session and read-only account/network access"]
+    fn smoke_native_home_schema() {
+        let client = NativeSpotify::restore().expect("saved native session");
+        let home = client.home("").expect("Home feed");
+        assert!(!home.shortcuts.is_empty());
+        assert!(!home.shelves.is_empty());
+        eprintln!(
+            "Home: {} shortcuts, {} shelves, {} chips, {} Canvas URLs",
+            home.shortcuts.len(),
+            home.shelves.len(),
+            home.chips.len(),
+            home.panels.iter().filter(|p| p.video_url.is_some()).count()
+        );
+        let shelf = home.shelves.first().expect("shelf");
+        let (items, next) = client.home_section(&shelf.uri, 0).expect("full shelf");
+        assert!(!items.is_empty());
+        eprintln!(
+            "Full shelf: {} items, next page: {}",
+            items.len(),
+            next.is_some()
+        );
+        if let Some(offset) = next {
+            let (_, after) = client
+                .home_section(&shelf.uri, offset)
+                .expect("next shelf page");
+            assert!(after.is_none_or(|after| after > offset));
+        }
+        for chip in home.chips {
+            let filtered = client.home(&chip.id).expect("category feed");
+            eprintln!("Category: {} shelves", filtered.shelves.len());
+        }
     }
 
     #[test]

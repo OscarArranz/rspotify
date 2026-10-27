@@ -89,6 +89,11 @@ header can distinguish "this playlist is active" from "a track from this playlis
 
 Global state remains unchanged: `AppState` holds only the authenticated client handle.
 
+Spec 009 adds a `PlaylistSource::Context` preview for album/artist/podcast library rows. Those
+sources reuse this track-page renderer but load their native context directly, without incorrectly
+calling `Playlist::get` on a non-playlist URI. Their cached identity is the context URI and their
+header kind comes from the source preview. This is not a dedicated album/artist-page redesign.
+
 ## Rendering
 
 The page uses one variable-height GPUI `list` so the header scrolls naturally and rows stay

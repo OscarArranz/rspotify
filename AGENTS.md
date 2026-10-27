@@ -59,8 +59,9 @@ applicable. Treat `specs/` as the source of truth for intended behavior.
 
 ## Native client constraints
 
-- **Login:** use Spotify's desktop OAuth client id and loopback redirect. Persist only the refresh
-  token and a stable device id; never persist the account password.
+- **Login:** use Spotify's desktop OAuth client id and loopback redirect. Persist the refresh token,
+  stable device id, and cached non-secret display name/avatar URL for optimistic startup UI; never
+  persist the account password or access token.
 - **Session:** use librespot's login5 session. Do not call the public Web API for search, library,
   or playback.
 - **Search:** use the Pathfinder `searchDesktop` persisted query. Get the bearer token from
@@ -136,3 +137,9 @@ The playback test starts audio. Pause or stop playback and do not leave the app 
   Spotify Connect playback. Implemented and verified.
 - `specs/002-playlist-detail-view/` — native playlist and Liked Songs detail page with virtualized
   rows, local search, sort, and pagination. Implemented; real-account and visual validation pending.
+- `specs/009-library-sidebar-parity/` — library panel redesign and native playlist/folder metadata.
+  Native saved categories, bounded Recents, pin state and explicit pin commands implemented;
+  account-write checks, creation/editing/drag organization and visual parity pending.
+- `specs/010-home-screen/` — native personalized Home feed, category chips, shelves and muted
+  Canvas recommendation panels. Read-only feed and headless decoding verified; actual desktop
+  visuals, playback actions and separate announcement/feedback integration remain pending.

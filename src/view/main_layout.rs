@@ -1,65 +1,40 @@
 use std::time::{Duration, Instant};
 
-use futures::channel::oneshot;
 use gpui::{
-    AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
-    StatefulInteractiveElement, Styled, Window, canvas, div, img, px, relative, rgb, svg,
+    AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
+    StatefulInteractiveElement, Styled, Subscription, Window, canvas, div, img,
+    prelude::FluentBuilder, px, relative, rgb, svg,
 };
 
-use crate::lib::spotify::{LibraryPlaylist, NativeSpotify, PlaybackSnapshot, PlaylistSource};
+use crate::lib::spotify::{NativeSpotify, PlaybackSnapshot};
 use crate::router::{StackRouter, StackRouterHandle};
 use crate::state::AppState;
-use crate::view::components::resizable::{h_resizable, resizable_panel};
-use crate::view::screens::playlist::{PlaylistScreen, render_cover};
+use crate::view::components::library::{LibrarySidebar, LibrarySize};
+use crate::view::components::render_cache::{cached_bar, cached_fill};
+use crate::view::components::resizable::{ResizableState, h_resizable, resizable_panel};
+use crate::view::screens::home::HomeScreen;
 
-const PANEL_MARGIN: f32 = 9.0;
-
-/// A simple home screen to show inside the stack router.
-pub struct HomeScreen;
-
-impl Render for HomeScreen {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .h_full()
-            .child(div().w(px(PANEL_MARGIN)))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .bg(rgb(0x121212))
-                    .rounded_lg()
-                    .gap_4()
-                    .size_full()
-                    .justify_center()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("Welcome to Spotify!"),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(0xb3b3b3))
-                            .child("Search for music and press play. Playback requires Premium."),
-                    ),
-            )
-    }
-}
+const PANEL_MARGIN: f32 = 8.0;
 
 /// Main layout containing the stack router, library and player bar.
 pub struct MainLayout {
     stack_router: Entity<StackRouter>,
     library: Entity<LibrarySidebar>,
     player: Option<Entity<PlayerBar>>,
+    client: Option<NativeSpotify>,
+    panels: Entity<ResizableState>,
+    library_size: LibrarySize,
+    normal_library_width: gpui::Pixels,
+    _library_subscription: Subscription,
+    has_client: bool,
+    _auth_subscription: Subscription,
 }
 
 impl MainLayout {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Create the stack router with HomeScreen as initial screen
-        let home = cx.new(|_| HomeScreen);
+        let home = cx.new(HomeScreen::new);
         let stack_router = cx.new(|_| StackRouter::with_initial(home.into()));
 
         // Register stack router globally so child components can navigate
@@ -69,20 +44,85 @@ impl MainLayout {
         let client = cx
             .try_global::<AppState>()
             .and_then(AppState::spotify_client);
-        let library = cx.new(|cx| LibrarySidebar::new(client.clone(), cx));
-        let player = client.map(|client| cx.new(|cx| PlayerBar::new(client, cx)));
+        let library = cx.new(|cx| LibrarySidebar::new(client.clone(), window, cx));
+        let panels = cx.new(|_| ResizableState::default());
+        let library_subscription = cx.subscribe(&library, |this, _, size: &LibrarySize, cx| {
+            if this.library_size == LibrarySize::Normal {
+                this.normal_library_width = this
+                    .panels
+                    .read(cx)
+                    .sizes()
+                    .first()
+                    .copied()
+                    .unwrap_or(px(316.0));
+            }
+            this.library_size = *size;
+            let width = match size {
+                LibrarySize::Normal => this.normal_library_width,
+                LibrarySize::Collapsed => px(80.0),
+                LibrarySize::Expanded => this.normal_library_width,
+            };
+            if *size != LibrarySize::Expanded {
+                this.panels
+                    .update(cx, |panels, cx| panels.set_first_size(width, cx));
+            }
+            cx.notify();
+        });
+        let player = client
+            .clone()
+            .map(|client| cx.new(|cx| PlayerBar::new(client, cx)));
+        let has_client = player.is_some();
+        let auth_subscription = cx.observe_global::<AppState>(|this, cx| {
+            this.attach_authenticated_client(cx);
+            cx.notify();
+        });
 
         Self {
             stack_router,
             library,
             player,
+            client,
+            panels,
+            library_size: LibrarySize::Normal,
+            normal_library_width: px(316.0),
+            _library_subscription: library_subscription,
+            has_client,
+            _auth_subscription: auth_subscription,
         }
+    }
+
+    fn attach_authenticated_client(&mut self, cx: &mut Context<Self>) {
+        if self.has_client {
+            return;
+        }
+        let Some(client) = cx
+            .try_global::<AppState>()
+            .and_then(AppState::spotify_client)
+        else {
+            return;
+        };
+        self.library
+            .update(cx, |library, cx| library.attach_client(client.clone(), cx));
+        self.player = Some(cx.new(|cx| PlayerBar::new(client.clone(), cx)));
+        self.client = Some(client);
+        self.has_client = true;
     }
 }
 
 impl Render for MainLayout {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "space"
+                    && !event.keystroke.modifiers.modified()
+                    && !event.is_held
+                    && window.focused(cx).is_none()
+                    && let Some(client) = &this.client
+                {
+                    let _ = client.play_pause();
+                    cx.stop_propagation();
+                }
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -91,220 +131,42 @@ impl Render for MainLayout {
             .px(px(PANEL_MARGIN))
             .pb(px(PANEL_MARGIN))
             .child(
-                div().flex_1().overflow_hidden().child(
-                    h_resizable("main-layout")
-                        .child(
-                            resizable_panel()
-                                .size(px(340.0))
-                                .child(self.library.clone()),
-                        )
-                        .child(resizable_panel().child(self.stack_router.clone())),
-                ),
-            )
-            .children(self.player.clone())
-    }
-}
-
-struct LibrarySidebar {
-    entries: Vec<LibraryPlaylist>,
-    client: Option<NativeSpotify>,
-}
-
-impl LibrarySidebar {
-    fn new(client: Option<NativeSpotify>, cx: &mut Context<Self>) -> Self {
-        let sidebar = Self {
-            entries: Vec::new(),
-            client: client.clone(),
-        };
-        if let Some(client) = client {
-            cx.spawn(async move |this, cx| {
-                let (tx, rx) = oneshot::channel();
-                std::thread::spawn(move || {
-                    let result = client.library_playlists();
-                    let _ = tx.send(result);
-                });
-
-                if let Ok(Ok(entries)) = rx.await {
-                    let _ = this.update(cx, |this, cx| {
-                        this.entries = entries;
-                        cx.notify();
-                    });
-                }
-            })
-            .detach();
-        }
-        sidebar
-    }
-}
-
-impl Render for LibrarySidebar {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let liked_client = self.client.clone();
-        let entries = self.entries.iter().enumerate().map(|(index, entry)| {
-            let client = self.client.clone();
-            let source = PlaylistSource::Playlist {
-                uri: entry.uri.clone(),
-                name: entry.name.clone(),
-                owner: entry.owner.clone(),
-                image_url: entry.image_url.clone(),
-            };
-            div()
-                .id(("library-entry", index))
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .p(px(6.0))
-                .rounded(px(5.0))
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(0x242424)))
-                .on_click(move |_, _, cx| {
-                    let Some(client) = &client else {
-                        return;
-                    };
-                    let Some(router) = cx.try_global::<StackRouterHandle>().cloned() else {
-                        return;
-                    };
-                    let screen =
-                        cx.new(|cx| PlaylistScreen::new(source.clone(), client.clone(), cx));
-                    router.push(screen.into(), cx);
-                })
-                .child(render_cover(
-                    entry.image_url.as_deref(),
-                    40.0,
-                    false,
-                    0x3a2d64,
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(3.0))
-                        .child(entry.name.clone())
-                        .child(div().text_sm().text_color(rgb(0xb3b3b3)).child(
-                            if entry.owner.is_empty() {
-                                "Playlist".to_string()
-                            } else {
-                                format!("Playlist · {}", entry.owner)
-                            },
-                        )),
-                )
-        });
-
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .mr(px(PANEL_MARGIN))
-            .p(px(16.0))
-            .gap(px(18.0))
-            .bg(rgb(0x121212))
-            .rounded_lg()
-            .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_color(rgb(0xb3b3b3))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("Your Library"),
-                    )
-                    .child(
-                        div()
-                            .px(px(12.0))
-                            .py(px(7.0))
-                            .rounded(px(18.0))
-                            .bg(rgb(0x242424))
-                            .text_sm()
-                            .child("＋ Create"),
-                    ),
-            )
-            .child(div().flex().flex_wrap().gap(px(7.0)).children(
-                ["Playlists", "Podcasts", "Albums", "Artists"].map(|filter| {
-                    div()
-                        .px(px(11.0))
-                        .py(px(7.0))
-                        .rounded(px(16.0))
-                        .bg(rgb(0x2a2a2a))
-                        .text_sm()
-                        .child(filter)
-                }),
-            ))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_color(rgb(0xb3b3b3))
-                    .text_sm()
-                    .child("⌕")
-                    .child("Recents  ☰"),
-            )
-            .child(
-                div()
-                    .id("liked-songs")
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .p(px(6.0))
-                    .rounded(px(5.0))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(0x242424)))
-                    .on_click(move |_, _, cx| {
-                        let Some(client) = &liked_client else {
-                            return;
-                        };
-                        let Some(router) = cx.try_global::<StackRouterHandle>().cloned() else {
-                            return;
-                        };
-                        let screen = cx.new(|cx| {
-                            PlaylistScreen::new(PlaylistSource::LikedSongs, client.clone(), cx)
-                        });
-                        router.push(screen.into(), cx);
-                    })
-                    .child(
-                        div()
-                            .size(px(40.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(0x5c44c7))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child("♥"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.0))
-                            .child("Liked Songs")
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0xb3b3b3))
-                                    .child("Playlist · Saved tracks"),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .id("library-entries")
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
                     .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .children(entries),
+                    .overflow_hidden()
+                    .when(self.library_size == LibrarySize::Expanded, |d| {
+                        d.child(cached_fill(self.library.clone()))
+                    })
+                    .when(self.library_size != LibrarySize::Expanded, |d| {
+                        d.child(
+                            h_resizable("main-layout")
+                                .with_state(&self.panels)
+                                .child(
+                                    resizable_panel()
+                                        .size(px(316.0))
+                                        .size_range(
+                                            if self.library_size == LibrarySize::Collapsed {
+                                                px(80.0)..px(80.0)
+                                            } else {
+                                                px(240.0)..px(800.0)
+                                            },
+                                        )
+                                        .child(
+                                            div()
+                                                .size_full()
+                                                .pr(px(PANEL_MARGIN))
+                                                .child(cached_fill(self.library.clone())),
+                                        ),
+                                )
+                                .child(
+                                    resizable_panel()
+                                        .size_range(px(240.0)..gpui::Pixels::MAX)
+                                        .child(cached_fill(self.stack_router.clone())),
+                                ),
+                        )
+                    }),
             )
-            .children(self.entries.is_empty().then(|| {
-                div()
-                    .py(px(8.0))
-                    .text_color(rgb(0xb3b3b3))
-                    .text_sm()
-                    .child("Your saved playlists will appear here.")
-            }))
+            .children(self.player.clone().map(|player| cached_bar(player, 76.0)))
     }
 }
 
@@ -317,6 +179,7 @@ struct PlayerBar {
     dragging: Option<SliderDrag>,
     optimistic_seek: Option<OptimisticSeek>,
     optimistic_volume: Option<OptimisticVolume>,
+    last_nonzero_volume: u8,
 }
 
 struct OptimisticSeek {
@@ -359,6 +222,11 @@ enum SliderDrag {
 impl PlayerBar {
     fn new(client: NativeSpotify, cx: &mut Context<Self>) -> Self {
         let playback = client.playback();
+        let last_nonzero_volume = if playback.volume_percent > 0 {
+            playback.volume_percent
+        } else {
+            50
+        };
         let poll_client = client.clone();
         cx.spawn(async move |this, cx| {
             loop {
@@ -368,6 +236,9 @@ impl PlayerBar {
                 let snapshot = poll_client.playback();
                 let updated = this.update(cx, |this, cx| {
                     if this.playback != snapshot {
+                        if snapshot.volume_percent > 0 {
+                            this.last_nonzero_volume = snapshot.volume_percent;
+                        }
                         this.playback = snapshot;
                         cx.notify();
                     }
@@ -387,6 +258,7 @@ impl PlayerBar {
             dragging: None,
             optimistic_seek: None,
             optimistic_volume: None,
+            last_nonzero_volume,
         }
     }
 }
@@ -450,7 +322,7 @@ impl Render for PlayerBar {
         let prev_client = client.clone();
         let play_client = client.clone();
         let next_client = client.clone();
-        let volume_client = client.clone();
+        let volume_button_client = client.clone();
         let weak = cx.entity().downgrade();
         let down_weak = weak.clone();
         let move_weak = weak.clone();
@@ -543,6 +415,9 @@ impl Render for PlayerBar {
                                 let percent = (slider_fraction(bounds, event.position.x) * 100.0)
                                     .round() as u8;
                                 let _ = this.client.set_volume_percent(percent);
+                                if percent > 0 {
+                                    this.last_nonzero_volume = percent;
+                                }
                                 this.optimistic_volume = Some(OptimisticVolume {
                                     target_percent: percent,
                                     started_at: Instant::now(),
@@ -728,17 +603,30 @@ impl Render for PlayerBar {
                     .w(px(220.0))
                     .flex_shrink_0()
                     .justify_end()
-                    .child(
+                    .child({
+                        let muted = displayed_volume == 0;
+                        let icon_path = if muted {
+                            "icons/volume-muted.svg"
+                        } else {
+                            "icons/volume-high.svg"
+                        };
+                        let restore_volume = self.last_nonzero_volume;
                         div()
-                            .id("volume-down")
+                            .id("volume-mute-toggle")
                             .cursor_pointer()
-                            .px(px(6.0))
-                            .text_color(rgb(0xb3b3b3))
+                            .p(px(4.0))
                             .on_click(move |_, _, _| {
-                                let _ = volume_client.set_volume_percent(volume.saturating_sub(5));
+                                let target = if muted { restore_volume } else { 0 };
+                                let _ = volume_button_client.set_volume_percent(target);
                             })
-                            .child("−"),
-                    )
+                            .child(
+                                svg()
+                                    .path(icon_path)
+                                    .size(px(20.0))
+                                    .text_color(rgb(0xb3b3b3))
+                                    .hover(|style| style.text_color(gpui::white())),
+                            )
+                    })
                     .child(
                         player_slider(
                             "volume-slider",
@@ -774,27 +662,6 @@ impl Render for PlayerBar {
                             },
                         )
                         .w(px(120.0)),
-                    )
-                    .child(
-                        div()
-                            .id("volume-up")
-                            .cursor_pointer()
-                            .px(px(6.0))
-                            .text_color(rgb(0xb3b3b3))
-                            .on_click({
-                                let client = client.clone();
-                                move |_, _, _| {
-                                    let _ = client.set_volume_percent(volume.saturating_add(5));
-                                }
-                            })
-                            .child("+"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0xb3b3b3))
-                            .w(px(32.0))
-                            .child(format!("{displayed_volume}%")),
                     ),
             )
     }

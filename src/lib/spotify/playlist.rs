@@ -39,28 +39,44 @@ pub enum PlaylistSource {
         owner: String,
         image_url: Option<String>,
     },
+    Context {
+        uri: String,
+        name: String,
+        owner: String,
+        image_url: Option<String>,
+        kind: &'static str,
+    },
     LikedSongs,
 }
 
 impl PlaylistSource {
     pub fn preview_name(&self) -> &str {
         match self {
-            Self::Playlist { name, .. } => name,
+            Self::Playlist { name, .. } | Self::Context { name, .. } => name,
             Self::LikedSongs => "Liked Songs",
         }
     }
 
     pub fn preview_owner(&self) -> &str {
         match self {
-            Self::Playlist { owner, .. } => owner,
+            Self::Playlist { owner, .. } | Self::Context { owner, .. } => owner,
             Self::LikedSongs => "",
         }
     }
 
     pub fn preview_image(&self) -> Option<&str> {
         match self {
-            Self::Playlist { image_url, .. } => image_url.as_deref(),
+            Self::Playlist { image_url, .. } | Self::Context { image_url, .. } => {
+                image_url.as_deref()
+            }
             Self::LikedSongs => None,
+        }
+    }
+
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Context { kind, .. } => kind,
+            _ => "Playlist",
         }
     }
 }
@@ -103,7 +119,7 @@ pub struct PlaylistPage {
 
 fn detail_cache_path(account: &str, source: &PlaylistSource) -> PathBuf {
     let identity = match source {
-        PlaylistSource::Playlist { uri, .. } => uri.as_str(),
+        PlaylistSource::Playlist { uri, .. } | PlaylistSource::Context { uri, .. } => uri.as_str(),
         // Use the same collection URI used by the native context request. Keep the
         // account in the key as an extra guard against sharing private library data.
         PlaylistSource::LikedSongs => {
@@ -192,7 +208,49 @@ pub async fn fetch_playlist_detail(
             image_url,
         } => fetch_saved_playlist(session, uri, name, owner, image_url).await,
         PlaylistSource::LikedSongs => fetch_liked_songs(session).await,
+        PlaylistSource::Context {
+            uri,
+            name,
+            owner,
+            image_url,
+            ..
+        } => fetch_catalog_context(session, uri, name, owner, image_url).await,
     }
+}
+
+async fn fetch_catalog_context(
+    session: &Session,
+    uri: String,
+    name: String,
+    owner_name: String,
+    image_url: Option<String>,
+) -> Result<PlaylistDetail, SpotifyError> {
+    let context = session
+        .spclient()
+        .get_context(&uri)
+        .await
+        .map_err(|e| SpotifyError::Api(e.to_string()))?;
+    let (mut tracks, next_page_url) = context_tracks(&context, &HashMap::new());
+    hydrate_tracks(session, &mut tracks).await;
+    let track_count =
+        context_track_count(&context).or_else(|| next_page_url.is_none().then_some(tracks.len()));
+    let accent = if let Some(url) = image_url.as_deref() {
+        sample_accent(url).await.unwrap_or(FALLBACK_ACCENT)
+    } else {
+        FALLBACK_ACCENT
+    };
+    Ok(PlaylistDetail {
+        context_uri: uri,
+        name,
+        owner_name,
+        image_url,
+        accent,
+        track_count,
+        tracks,
+        next_page_url,
+        total_duration_ms: context_duration_ms(&context),
+        ..Default::default()
+    })
 }
 
 /// Loads one additional context page for infinite scrolling.
@@ -414,13 +472,30 @@ fn track_from_context(track: &ContextTrack, added_at: &HashMap<String, i64>) -> 
 }
 
 #[derive(Clone, Debug, Default)]
-struct HydratedTrack {
-    title: String,
-    artist: String,
-    album: String,
-    image_url: Option<String>,
-    duration_ms: u64,
+pub(crate) struct HydratedTrack {
+    pub(crate) title: String,
+    pub(crate) artist: String,
+    pub(crate) album: String,
+    pub(crate) image_url: Option<String>,
+    pub(crate) duration_ms: u64,
     explicit: bool,
+}
+
+pub(crate) async fn fetch_track_metadata(
+    session: &Session,
+    uri: &str,
+) -> Result<Option<HydratedTrack>, SpotifyError> {
+    let kind = if uri.starts_with("spotify:episode:") {
+        ExtensionKind::EPISODE_V4
+    } else if uri.starts_with("spotify:track:") {
+        ExtensionKind::TRACK_V4
+    } else {
+        return Ok(None);
+    };
+    let uris = [uri.to_string()];
+    Ok(fetch_metadata_batch(session, &uris, kind)
+        .await?
+        .remove(uri))
 }
 
 /// Fills in titles, artists, albums, artwork, and durations for context tracks

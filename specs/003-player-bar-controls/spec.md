@@ -22,3 +22,5 @@ Make playback progress and volume directly interactive and closer to Spotify des
 5. Seeking is safely disabled with no track or zero duration.
 6. `cargo fmt --check`, `cargo check`, and `cargo test` pass.
 7. Visual and real-account checks are recorded when explicitly approved.
+8. Playing the track restored from Spotify advances from the actual local playback position without
+   alternating with the previous Connect position. Pausing and backward seeking remain accurate.

@@ -66,6 +66,20 @@ impl Default for ResizableState {
 }
 
 impl ResizableState {
+    /// Set the library/content split without synthesizing a mouse drag.
+    pub(crate) fn set_first_size(&mut self, size: Pixels, cx: &mut Context<Self>) {
+        if self.panels.len() != 2 || self.container_size() <= px(0.0) {
+            return;
+        }
+        let total = self.container_size();
+        let size = size.clamp(px(80.0), (total - px(240.0)).max(px(80.0)));
+        self.sizes = vec![size, total - size];
+        for (panel, size) in self.panels.iter_mut().zip(&self.sizes) {
+            panel.size = Some(*size);
+        }
+        cx.notify();
+    }
+
     /// Get the size of the panels.
     pub fn sizes(&self) -> &Vec<Pixels> {
         &self.sizes
@@ -143,16 +157,17 @@ impl ResizableState {
         cx: &mut Context<Self>,
     ) {
         let size = bounds.size.along(self.axis);
-        // This check is only necessary to stop the very first panel from resizing on its own
-        // it needs to be passed when the panel is freshly created so we get the initial size,
-        // but its also fine when it sometimes passes later.
-        if self.sizes[panel_ix].as_f32() == PANEL_MIN_SIZE.as_f32() {
-            self.sizes[panel_ix] = size;
-            self.panels[panel_ix].size = Some(size);
-        }
+        // Keep measured geometry authoritative after mode changes and window resizes.
+        let changed = self.sizes[panel_ix] != size
+            || self.panels[panel_ix].bounds != bounds
+            || self.panels[panel_ix].size_range != size_range;
+        self.sizes[panel_ix] = size;
+        self.panels[panel_ix].size = Some(size);
         self.panels[panel_ix].bounds = bounds;
         self.panels[panel_ix].size_range = size_range;
-        cx.notify();
+        if changed {
+            cx.notify();
+        }
     }
 
     pub(crate) fn remove_panel(&mut self, panel_ix: usize, cx: &mut Context<Self>) {
@@ -286,6 +301,29 @@ impl ResizableState {
 
         let container_size = self.container_size();
         let total_size = px(self.sizes.iter().map(|s| s.as_f32()).sum::<f32>());
+        if total_size <= px(0.0) {
+            return;
+        }
+
+        // The library's collapsed width must stay fixed when the window is resized.
+        // Proportional scaling alone can leave a phantom gutter because rendering clamps
+        // the first panel but the stored content width still uses the unclamped value.
+        if self.panels.len() == 2 {
+            let desired = container_size * (self.sizes[0] / total_size);
+            if let Some(sizes) = fit_split(
+                container_size,
+                desired,
+                self.panel_size_range(0),
+                self.panel_size_range(1),
+            ) {
+                self.sizes = sizes.to_vec();
+                for (panel, size) in self.panels.iter_mut().zip(sizes) {
+                    panel.size = Some(size);
+                }
+                cx.notify();
+                return;
+            }
+        }
 
         for i in 0..self.panels.len() {
             let size = self.sizes[i];
@@ -296,6 +334,82 @@ impl ResizableState {
             self.panels[i].size = Some(new_size);
         }
         cx.notify();
+    }
+}
+
+fn fit_split(
+    total: Pixels,
+    desired: Pixels,
+    first: Range<Pixels>,
+    second: Range<Pixels>,
+) -> Option<[Pixels; 2]> {
+    // Before the first prepaint, panel constraints have not been populated yet.
+    if first.end <= px(0.0) || second.end <= px(0.0) {
+        return None;
+    }
+    let minimum = first.start.max(total - second.end);
+    let maximum = first.end.min(total - second.start);
+    if minimum > maximum {
+        return None;
+    }
+    let first = desired.clamp(minimum, maximum);
+    Some([first, total - first])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapsed_library_stays_fixed_on_window_resize() {
+        assert_eq!(
+            fit_split(
+                px(1200.0),
+                px(150.0),
+                px(80.0)..px(80.0),
+                px(240.0)..Pixels::MAX
+            ),
+            Some([px(80.0), px(1120.0)])
+        );
+    }
+
+    #[test]
+    fn expanded_library_leaves_space_for_content() {
+        assert_eq!(
+            fit_split(
+                px(700.0),
+                px(593.0),
+                px(240.0)..px(800.0),
+                px(240.0)..Pixels::MAX
+            ),
+            Some([px(460.0), px(240.0)])
+        );
+        assert_eq!(
+            fit_split(
+                px(1400.0),
+                px(900.0),
+                px(240.0)..px(800.0),
+                px(240.0)..Pixels::MAX
+            ),
+            Some([px(800.0), px(600.0)])
+        );
+    }
+
+    #[test]
+    fn impossible_or_uninitialized_constraints_do_not_panic() {
+        assert_eq!(
+            fit_split(
+                px(300.0),
+                px(240.0),
+                px(240.0)..px(800.0),
+                px(240.0)..Pixels::MAX
+            ),
+            None
+        );
+        assert_eq!(
+            fit_split(px(900.0), px(300.0), px(0.0)..px(0.0), px(0.0)..px(0.0)),
+            None
+        );
     }
 }
 

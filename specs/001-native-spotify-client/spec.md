@@ -14,11 +14,13 @@ the user's library, and play audio locally through a Spotify Connect device.
 
 - The sign-in screen offers **Log in with Spotify**. The first sign-in opens Spotify's OAuth page
   in the browser; after authorisation the loopback callback returns to the app.
-- A stored refresh token lets a returning user sign in without visiting the browser again, unless
-  Spotify rejects the stored session.
+- Returning users see the main app immediately with their last saved profile details while the app
+  refreshes their stored session in the background. A valid refresh never opens the browser.
 - After sign-in, the titlebar shows back/forward navigation, the home button, search, notification
   and friends placeholders, and the user's avatar. The library sidebar lists the user's saved
   playlists. The player bar shows the current track, progress, and playback controls.
+- Custom minimize, maximize, and close controls are shown on Windows only; Linux keeps its system
+  window decorations without duplicate controls in the titlebar.
 - Search is grouped into All, Songs, Artists, Albums, Playlists, and Podcasts & Shows tabs.
   Clicking a track or episode starts single-track playback; clicking another result starts that
   context.
@@ -33,15 +35,20 @@ the user's library, and play audio locally through a Spotify Connect device.
 ### Authentication and session
 
 - Use Spotify's desktop OAuth client id and loopback redirect against `accounts.spotify.com`.
-- Persist only the OAuth refresh token and a stable device id in `~/.cache/rspotify/session.json`.
+- Persist the OAuth refresh token, stable device id, and non-secret display name/avatar URL in
+  `~/.cache/rspotify/session.json`.
   Write the file with owner-only permissions (`0600`) and its directory with `0700` on Unix.
 - Exchange the OAuth token through librespot's native `login5` session. Do not use the public Web
   API for search, library, or playback.
 - Never persist the account password or log access/refresh tokens.
-- Do not auto-login on launch: the user clicks **Log in with Spotify**, and a stored refresh token
-  skips the browser step.
-- Run interactive OAuth and session setup off the GPUI foreground thread. Show a loading state and
-  surface errors on the sign-in screen.
+- On launch, show the main layout immediately when a stored refresh token exists, using cached
+  profile details when available; restore authentication in the background without showing the
+  sign-in page first.
+- If refresh credentials are confirmed rejected, clear the invalid refresh token and show sign-in.
+  For temporary network or session setup failures, preserve the optimistic main layout and cached
+  profile so the user can retry without being signed out.
+- Run OAuth and session setup off the GPUI foreground thread. Show loading/error state for explicit
+  sign-in; startup restoration failures keep the cached UI and retry on the next app launch.
 
 ### Search
 
@@ -76,6 +83,8 @@ the user's library, and play audio locally through a Spotify Connect device.
   artists, shows, and Liked Songs.
 - Keep a shared playback snapshot updated from librespot player events. Extrapolate the position
   while playing and poll it from the player bar without blocking on the player event channel.
+- When a song ends and the next starts, show the new song's metadata. Local player events are
+  authoritative while rspotify is active; stale Connect server state must not restore the old song.
 - Support play/pause, previous/next, seek, and volume changes. Playback requires Premium; do not
   bypass DRM.
 - Use the bundled SVG media icons rather than relying on font glyphs.
@@ -86,8 +95,9 @@ the user's library, and play audio locally through a Spotify Connect device.
   identity, without requiring the Spotify Flatpak. A user-local setup command registers a working
   development launcher and refreshes both desktop-entry and icon-loader caches on KDE.
 
-- `AppState` owns the authenticated `NativeSpotify` handle. It is set after successful login and
-  observed by the titlebar so authenticated controls appear immediately.
+- `AppState` owns the authenticated `NativeSpotify` handle and cached display profile. A cached
+  profile can make the UI optimistically logged in before the client is restored; the titlebar and
+  main layout observe global state as restoration completes.
 - Keep navigation in the existing path and stack routers. The home button resets the stack to the
   home screen.
 - Keep library and player state in their GPUI entities; do not introduce another global store.
@@ -99,8 +109,8 @@ the user's library, and play audio locally through a Spotify Connect device.
 - Playlist detail, album/artist pages, queue, lyrics, and search pagination are not included.
 - Shuffle/repeat controls are not exposed in the player bar in this iteration, even though the
   client exposes the underlying Connect methods.
-- Auto-login, offline cache controls, audio-quality settings, keyboard shortcuts, system media
-  keys, and packaging are follow-up work.
+- Offline cache controls, audio-quality settings, keyboard shortcuts, system media keys, and
+  packaging are follow-up work.
 - No public Web API fallback and no Widevine/PlayPlay reimplementation. librespot owns the native
   protocol and DRM path.
 - The OAuth scopes include write permissions for desktop parity, but no playlist-editing UI is
@@ -110,8 +120,10 @@ the user's library, and play audio locally through a Spotify Connect device.
 
 1. A first-time user can click **Log in with Spotify**, complete the browser flow, and land on the
    main layout with the titlebar reflecting the authenticated state.
-2. A returning user with a valid stored refresh token can sign in without the browser flow; an
-   invalid token falls back to the browser flow.
+2. A returning user with a saved profile sees the main layout and last known name/avatar immediately
+   while a valid stored refresh token restores the session in the background without a browser
+   flow. A confirmed rejected token clears the session and shows sign-in; temporary failures retain
+   the optimistic UI.
 3. A search returns categorized results for tracks, artists, albums, playlists, and podcasts, and
    tab changes show the matching group.
 4. Clicking a track or episode starts single-track playback; clicking an album, playlist, artist,

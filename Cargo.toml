@@ -5,6 +5,7 @@ edition = "2024"
 
 [workspace]
 members = [".", "reqwest_client"]
+exclude = ["vendor/librespot-connect"]
 
 [workspace.package]
 edition = "2024"
@@ -32,9 +33,13 @@ rust-embed = { version = "8.11.0", features = ["debug-embed"] }
 librespot = { version = "0.8", default-features = false, features = ["native-tls", "rodio-backend"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", features = ["Wdk_System_SystemServices", "Win32_System_SystemInformation"] }
 
 [patch.crates-io]
 ashpd-011 = { package = "ashpd", path = "vendor/ashpd-0.11.0" }
 ashpd-012 = { package = "ashpd", path = "vendor/ashpd-0.12.0" }
+librespot-connect = { path = "vendor/librespot-connect" }

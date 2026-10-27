@@ -6,6 +6,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::view::components::smooth_scroll::{SmoothScrollState, list_scroll_overlay};
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use gpui::{
@@ -76,6 +77,7 @@ pub(crate) struct PlaylistScreen {
     next_page_loading: bool,
     next_page_error: Option<String>,
     action_error: Option<String>,
+    scroll_animation: SmoothScrollState,
 }
 
 impl PlaylistScreen {
@@ -108,6 +110,7 @@ impl PlaylistScreen {
             next_page_loading: false,
             next_page_error: None,
             action_error: None,
+            scroll_animation: SmoothScrollState::new(cx.entity_id()),
         };
         if matches!(this.source, PlaylistSource::LikedSongs) {
             if let Some(detail) = this.client.loaded_liked_songs_detail() {
@@ -127,6 +130,7 @@ impl PlaylistScreen {
         self.next_page_loading = false;
         self.next_page_error = None;
         self.action_error = None;
+        self.scroll_animation.cancel();
         self.list_state.reset(self.item_count().max(1));
 
         let client = self.client.clone();
@@ -171,6 +175,7 @@ impl PlaylistScreen {
         self.action_error = None;
         self.rebuild_visible();
         self.state = LoadState::Loaded;
+        self.scroll_animation.cancel();
         self.list_state.reset(self.item_count());
         cx.notify();
     }
@@ -234,6 +239,26 @@ impl PlaylistScreen {
             return;
         };
         self.load_next_page(next_page_url, cx);
+    }
+
+    fn on_animated_scroll(&mut self, cx: &mut Context<Self>) {
+        let top = self.list_state.logical_scroll_top().item_ix;
+        let bottom = self.list_state.viewport_bounds().bottom();
+        let mut end = top;
+        while end < self.item_count() {
+            match self.list_state.bounds_for_item(end) {
+                Some(bounds) if bounds.top() < bottom => end += 1,
+                _ => break,
+            }
+        }
+        self.on_scroll(
+            &ListScrollEvent {
+                visible_range: top..end,
+                count: self.item_count(),
+                is_scrolled: top > 0,
+            },
+            cx,
+        );
     }
 
     fn load_next_page(&mut self, next_page_url: String, cx: &mut Context<Self>) {
@@ -385,6 +410,7 @@ impl PlaylistScreen {
     fn cycle_sort(&mut self, cx: &mut Context<Self>) {
         self.sort = self.sort.next();
         self.rebuild_visible();
+        self.scroll_animation.cancel();
         self.list_state.reset(self.item_count());
         cx.notify();
     }
@@ -398,6 +424,7 @@ impl PlaylistScreen {
             }
             window.blur();
             self.rebuild_visible();
+            self.scroll_animation.cancel();
             self.list_state.reset(self.item_count());
             cx.notify();
             return;
@@ -409,6 +436,7 @@ impl PlaylistScreen {
                 if matches!(event, InputEvent::Change) {
                     this.search_query = input.read(cx).value().to_string();
                     this.rebuild_visible();
+                    this.scroll_animation.cancel();
                     this.list_state.reset(this.item_count());
                     cx.notify();
                 }
@@ -539,7 +567,7 @@ impl PlaylistScreen {
                         div()
                             .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .child("Playlist"),
+                            .child(self.source.kind_label()),
                     )
                     .child(
                         div()
@@ -628,7 +656,7 @@ impl PlaylistScreen {
                         div()
                             .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .child("Playlist"),
+                            .child(self.source.kind_label()),
                     )
                     .child(
                         div()
@@ -1207,14 +1235,29 @@ impl Render for PlaylistScreen {
         {
             self.render_empty_page(header_height, cover_size, cx)
         } else {
-            list(
-                self.list_state.clone(),
-                cx.processor(move |this, index, _, cx| {
-                    this.render_item(index, header_height, cover_size, cx)
-                }),
-            )
-            .size_full()
-            .into_any_element()
+            div()
+                .relative()
+                .size_full()
+                .child(
+                    list(
+                        self.list_state.clone(),
+                        cx.processor(move |this, index, _, cx| {
+                            this.render_item(index, header_height, cover_size, cx)
+                        }),
+                    )
+                    .size_full(),
+                )
+                .child(list_scroll_overlay(
+                    self.list_state.clone(),
+                    self.scroll_animation.clone(),
+                    {
+                        let weak = cx.entity().downgrade();
+                        move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| this.on_animated_scroll(cx));
+                        }
+                    },
+                ))
+                .into_any_element()
         };
 
         page.child(content).into_any_element()
