@@ -278,6 +278,14 @@ rspotify's explicit Pin/Unpin action writes a single ylpin membership and verifi
 reads before changing the UI. It does not report optimistic success. Account-write validation was
 **not performed**; offline tests cover serialization, including remove/timestamp/update-ID fields.
 
+rspotify's Like/Unlike action reuses the same `collection/v2/write` contract with set `collection`.
+A like is an item with `is_removed = false`; an unlike is a newer tombstone with `is_removed = true`.
+Membership comes from `collection/v2/paging` (`collection` set), excluding tombstones, albums,
+shows and local files. The client treats HTTP 200 as the write acknowledgment, updates its local
+membership, then reconciles with a debounced authoritative snapshot. Like/unlike account-write
+validation was **not performed** for this iteration; offline tests cover the tombstone encoding and
+track filtering.
+
 #### Per-item metadata failures are not service failures
 
 Diagnostic run (`smoke_native_library_diagnostics`, counts only, no titles or URIs) on the test

@@ -138,3 +138,6 @@ The playback test starts audio. Pause or stop playback and do not leave the app 
 - `specs/010-home-screen/` — native personalized Home feed, category chips, shelves and muted
   Canvas recommendation panels. Read-only feed and headless decoding verified; actual desktop
   visuals, playback actions and separate announcement/feedback integration remain pending.
+- `specs/011-like-unlike-songs/` — native Like/Unlike controls in the now-playing bar and playlist
+  rows, with per-session membership, optimistic updates and Liked Songs pruning. Implemented;
+  live write and visual validation pending.

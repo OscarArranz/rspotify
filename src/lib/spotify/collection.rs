@@ -164,13 +164,23 @@ fn membership_write(
     Ok(bytes)
 }
 
-/// Account mutation, called only from an explicit Pin/Unpin UI action, never by loading/tests.
-/// Confirm actual membership with a read after the status-based write acknowledgment.
-pub(crate) async fn set_pinned(
+/// Live track memberships from a collection snapshot. Saved albums, local files and tombstones
+/// are not songs in Liked Songs.
+pub(crate) fn liked_track_uris(items: &[CollectionItem]) -> HashSet<String> {
+    items
+        .iter()
+        .filter(|item| !item.removed && item.uri.starts_with("spotify:track:"))
+        .map(|item| item.uri.clone())
+        .collect()
+}
+
+async fn write_membership(
     session: &Session,
+    set: &str,
     uri: &str,
-    pinned: bool,
-) -> Result<HashSet<String>, SpotifyError> {
+    removed: bool,
+    timeout_message: &'static str,
+) -> Result<(), SpotifyError> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -179,9 +189,9 @@ pub(crate) async fn set_pinned(
     let update_id = format!("{:016x}", rand::random::<u64>());
     let body = membership_write(
         &session.username(),
-        "ylpin",
+        set,
         uri,
-        !pinned,
+        removed,
         timestamp,
         &update_id,
     )
@@ -199,8 +209,26 @@ pub(crate) async fn set_pinned(
         ),
     )
     .await
-    .map_err(|_| SpotifyError::Api("Pin request timed out; refresh to check its result".into()))?
+    .map_err(|_| SpotifyError::Api(timeout_message.into()))?
     .map_err(|e| SpotifyError::Api(e.to_string()))?;
+    Ok(())
+}
+
+/// Account mutation, called only from an explicit Pin/Unpin UI action, never by loading/tests.
+/// Confirm actual membership with a read after the status-based write acknowledgment.
+pub(crate) async fn set_pinned(
+    session: &Session,
+    uri: &str,
+    pinned: bool,
+) -> Result<HashSet<String>, SpotifyError> {
+    write_membership(
+        session,
+        "ylpin",
+        uri,
+        !pinned,
+        "Pin request timed out; refresh to check its result",
+    )
+    .await?;
     for attempt in 0..3 {
         let pins: HashSet<_> = snapshot(session, "ylpin")
             .await.map_err(|_| SpotifyError::Api("Pin write was acknowledged but membership could not be verified. Refresh Your Library to check its result.".into()))?
@@ -218,6 +246,28 @@ pub(crate) async fn set_pinned(
     Err(SpotifyError::Api(
         "Pin change could not be verified. Refresh Your Library to check its result.".into(),
     ))
+}
+
+/// Add or remove a song from Liked Songs. The native client treats HTTP 200 as the write
+/// acknowledgment; callers update their local membership and reconcile with a later snapshot.
+pub(crate) async fn set_liked(
+    session: &Session,
+    uri: &str,
+    liked: bool,
+) -> Result<(), SpotifyError> {
+    if !uri.starts_with("spotify:track:") {
+        return Err(SpotifyError::Api(
+            "Only Spotify tracks can be saved to Liked Songs".into(),
+        ));
+    }
+    write_membership(
+        session,
+        "collection",
+        uri,
+        !liked,
+        "Liked Songs write timed out; refresh to check its result",
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -268,6 +318,65 @@ mod tests {
         assert_eq!(item.added_at, 4_000_000_000);
         assert_eq!(input.read_raw_tag_or_eof().unwrap(), Some(34));
         assert_eq!(input.read_string().unwrap(), "0123456789abcdef");
+    }
+
+    #[test]
+    fn liked_write_uses_collection_set_and_tombstone_without_making_any_request() {
+        let bytes = membership_write(
+            "fixture-account",
+            "collection",
+            "spotify:track:fixture",
+            true,
+            4_000_000_000,
+            "0123456789abcdef",
+        )
+        .unwrap();
+        let mut input = CodedInputStream::from_bytes(&bytes);
+        assert_eq!(input.read_raw_tag_or_eof().unwrap(), Some(10));
+        assert_eq!(input.read_string().unwrap(), "fixture-account");
+        assert_eq!(input.read_raw_tag_or_eof().unwrap(), Some(18));
+        assert_eq!(input.read_string().unwrap(), "collection");
+        assert_eq!(input.read_raw_tag_or_eof().unwrap(), Some(26));
+        let item = parse_item(&input.read_bytes().unwrap()).unwrap();
+        assert_eq!(item.uri, "spotify:track:fixture");
+        assert!(item.removed);
+        assert_eq!(item.added_at, 4_000_000_000);
+        assert_eq!(input.read_raw_tag_or_eof().unwrap(), Some(34));
+        assert_eq!(input.read_string().unwrap(), "0123456789abcdef");
+    }
+
+    #[test]
+    fn liked_memberships_ignore_albums_local_files_and_tombstones() {
+        let items = vec![
+            CollectionItem {
+                uri: "spotify:track:first".into(),
+                added_at: 30,
+                ..Default::default()
+            },
+            CollectionItem {
+                uri: "spotify:album:fixture".into(),
+                added_at: 20,
+                ..Default::default()
+            },
+            CollectionItem {
+                uri: "spotify:local:artist:album:song:120".into(),
+                added_at: 20,
+                ..Default::default()
+            },
+            CollectionItem {
+                uri: "spotify:track:second".into(),
+                added_at: 10,
+                ..Default::default()
+            },
+            CollectionItem {
+                uri: "spotify:track:second".into(),
+                added_at: 40,
+                removed: true,
+                ..Default::default()
+            },
+        ];
+        let liked = liked_track_uris(&latest_items(items));
+        assert_eq!(liked, HashSet::from(["spotify:track:first".to_string()]));
     }
 
     #[test]

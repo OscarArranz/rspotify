@@ -1,8 +1,11 @@
 //! Native Spotify client: OAuth login, librespot session, Pathfinder search and
 //! Spotify Connect playback.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use librespot::connect::{ConnectConfig, LoadRequest, LoadRequestOptions, PlayingTrack, Spirc};
 use librespot::core::{
@@ -106,6 +109,36 @@ impl Default for PlaybackSnapshot {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LikedStatus {
+    /// Membership has not loaded yet, or the item is not a Spotify track.
+    Unknown,
+    Liked,
+    NotLiked,
+}
+
+struct LikedCache {
+    tracks: HashSet<String>,
+    loaded: bool,
+    loading: bool,
+    revision: u64,
+    last_attempt: Option<Instant>,
+    refresh_generation: u64,
+}
+
+impl Default for LikedCache {
+    fn default() -> Self {
+        Self {
+            tracks: HashSet::new(),
+            loaded: false,
+            loading: false,
+            revision: 0,
+            last_attempt: None,
+            refresh_generation: 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UserProfile {
     pub name: String,
@@ -186,6 +219,7 @@ struct NativeInner {
     runtime: Arc<tokio::runtime::Runtime>,
     username: String,
     liked_songs_detail: Mutex<Option<PlaylistDetail>>,
+    liked: Arc<Mutex<LikedCache>>,
 }
 
 /// Cloneable handle to an authenticated native Spotify session.
@@ -372,7 +406,7 @@ impl NativeSpotify {
         let liked_songs_detail =
             playlist::read_cached_detail(&username, &PlaylistSource::LikedSongs);
 
-        Ok(Self {
+        let client = Self {
             inner: Arc::new(NativeInner {
                 session,
                 spirc,
@@ -381,8 +415,11 @@ impl NativeSpotify {
                 runtime,
                 username,
                 liked_songs_detail: Mutex::new(liked_songs_detail),
+                liked: Arc::new(Mutex::new(LikedCache::default())),
             }),
-        })
+        };
+        client.ensure_liked_tracks_loaded();
+        Ok(client)
     }
 
     pub fn username(&self) -> &str {
@@ -424,6 +461,141 @@ impl NativeSpotify {
         self.inner
             .runtime
             .block_on(super::library::hydrate(&self.inner.session, entries, cache))
+    }
+
+    /// Start the one-per-session liked membership load. Retries are throttled; the GPUI thread
+    /// never waits on the network here.
+    pub fn ensure_liked_tracks_loaded(&self) {
+        {
+            let mut cache = self.inner.liked.lock().unwrap();
+            if cache.loaded || cache.loading {
+                return;
+            }
+            if cache
+                .last_attempt
+                .is_some_and(|attempt| attempt.elapsed() < Duration::from_secs(10))
+            {
+                return;
+            }
+            cache.loading = true;
+            cache.last_attempt = Some(Instant::now());
+        }
+        let session = self.inner.session.clone();
+        let liked = self.inner.liked.clone();
+        self.inner.runtime.spawn(async move {
+            let result = super::collection::snapshot(&session, "collection").await;
+            let mut cache = liked.lock().unwrap();
+            cache.loading = false;
+            if let Ok(items) = result {
+                cache.tracks = super::collection::liked_track_uris(&items);
+                cache.loaded = true;
+                cache.revision = cache.revision.wrapping_add(1);
+            }
+        });
+    }
+
+    /// Monotonic counter for liked membership changes, safe to poll from the UI thread.
+    pub fn liked_revision(&self) -> u64 {
+        self.inner.liked.lock().unwrap().revision
+    }
+
+    /// True once the first authoritative liked-track snapshot has loaded.
+    pub fn liked_loaded(&self) -> bool {
+        self.inner.liked.lock().unwrap().loaded
+    }
+
+    pub fn liked_status(&self, uri: &str) -> LikedStatus {
+        let cache = self.inner.liked.lock().unwrap();
+        if !cache.loaded || !uri.starts_with("spotify:track:") {
+            return LikedStatus::Unknown;
+        }
+        if cache.tracks.contains(uri) {
+            LikedStatus::Liked
+        } else {
+            LikedStatus::NotLiked
+        }
+    }
+
+    /// Blocking account mutation for an explicit like/unlike action. Workers only.
+    pub fn set_liked(&self, uri: &str, liked: bool) -> Result<(), SpotifyError> {
+        if !uri.starts_with("spotify:track:") {
+            return Err(SpotifyError::Api(
+                "Only Spotify tracks can be saved to Liked Songs".into(),
+            ));
+        }
+        if !self.inner.liked.lock().unwrap().loaded {
+            return Err(SpotifyError::Api(
+                "Liked Songs are still loading; try again in a moment".into(),
+            ));
+        }
+        self.inner.runtime.block_on(super::collection::set_liked(
+            &self.inner.session,
+            uri,
+            liked,
+        ))?;
+        {
+            let mut cache = self.inner.liked.lock().unwrap();
+            if cache.loaded {
+                if liked {
+                    cache.tracks.insert(uri.to_string());
+                } else {
+                    cache.tracks.remove(uri);
+                }
+                cache.revision = cache.revision.wrapping_add(1);
+            }
+        }
+        if !liked {
+            self.prune_liked_songs_detail(uri);
+        }
+        self.schedule_liked_refresh();
+        Ok(())
+    }
+
+    /// Remove an unliked track from the retained Liked Songs page and its disk cache so it
+    /// cannot briefly reappear before the next network refresh.
+    fn prune_liked_songs_detail(&self, uri: &str) {
+        let updated = {
+            let mut guard = self.inner.liked_songs_detail.lock().unwrap();
+            let Some(detail) = guard.as_mut() else {
+                return;
+            };
+            if detail.remove_track_uri(uri) == 0 {
+                return;
+            }
+            detail.clone()
+        };
+        playlist::write_cached_detail(&self.inner.username, &PlaylistSource::LikedSongs, &updated);
+    }
+
+    /// Re-read membership after a write burst. Only the newest scheduled refresh performs the
+    /// request, so rapid toggles do not each fetch the whole collection.
+    fn schedule_liked_refresh(&self) {
+        let generation = {
+            let mut cache = self.inner.liked.lock().unwrap();
+            cache.refresh_generation = cache.refresh_generation.wrapping_add(1);
+            cache.refresh_generation
+        };
+        let session = self.inner.session.clone();
+        let liked = self.inner.liked.clone();
+        self.inner.runtime.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_200)).await;
+            if liked.lock().unwrap().refresh_generation != generation {
+                return;
+            }
+            let Ok(items) = super::collection::snapshot(&session, "collection").await else {
+                return;
+            };
+            let tracks = super::collection::liked_track_uris(&items);
+            let mut cache = liked.lock().unwrap();
+            if cache.refresh_generation != generation {
+                return;
+            }
+            if !cache.loaded || cache.tracks != tracks {
+                cache.tracks = tracks;
+                cache.loaded = true;
+                cache.revision = cache.revision.wrapping_add(1);
+            }
+        });
     }
 
     /// Searches Spotify's own Pathfinder endpoint. Blocking; call from a worker thread.

@@ -16,7 +16,7 @@ mod playlist;
 mod search;
 mod store;
 
-pub use client::{NativeSpotify, PlaybackSnapshot, UserProfile};
+pub use client::{LikedStatus, NativeSpotify, PlaybackSnapshot, UserProfile};
 pub use error::SpotifyError;
 pub use playlist::{PlaylistDetail, PlaylistPage, PlaylistSource};
 pub use search::{SearchItem, SearchResults};

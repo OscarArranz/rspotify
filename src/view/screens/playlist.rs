@@ -4,8 +4,10 @@
 //! track rows stay virtualized. Data comes from the native playlist/context
 //! endpoints in `crate::lib::spotify`.
 
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::view::components::liked::{MUTED, like_plus, liked_check};
 use crate::view::components::smooth_scroll::{SmoothScrollState, list_scroll_overlay};
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
@@ -17,12 +19,13 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState};
 
 use crate::lib::spotify::{
-    NativeSpotify, PlaybackSnapshot, PlaylistDetail, PlaylistPage, PlaylistSource,
+    LikedStatus, NativeSpotify, PlaybackSnapshot, PlaylistDetail, PlaylistPage, PlaylistSource,
 };
 
 const TRACK_OFFSET: usize = 3;
 const ALBUM_WIDTH: f32 = 160.0;
 const DATE_WIDTH: f32 = 140.0;
+const LIKED_WIDTH: f32 = 28.0;
 const DURATION_WIDTH: f32 = 56.0;
 const PANEL_BG: u32 = 0x121212;
 
@@ -78,6 +81,9 @@ pub(crate) struct PlaylistScreen {
     next_page_error: Option<String>,
     action_error: Option<String>,
     scroll_animation: SmoothScrollState,
+    liked_revision: u64,
+    liked_pending: HashSet<String>,
+    liked_overrides: HashMap<String, bool>,
 }
 
 impl PlaylistScreen {
@@ -96,6 +102,7 @@ impl PlaylistScreen {
 
         let mut this = Self {
             playback: client.playback(),
+            liked_revision: client.liked_revision(),
             source,
             client,
             state: LoadState::Loading,
@@ -111,7 +118,10 @@ impl PlaylistScreen {
             next_page_error: None,
             action_error: None,
             scroll_animation: SmoothScrollState::new(cx.entity_id()),
+            liked_pending: HashSet::new(),
+            liked_overrides: HashMap::new(),
         };
+        this.client.ensure_liked_tracks_loaded();
         if matches!(this.source, PlaylistSource::LikedSongs) {
             if let Some(detail) = this.client.loaded_liked_songs_detail() {
                 this.apply_detail(detail, cx);
@@ -187,14 +197,21 @@ impl PlaylistScreen {
                 cx.background_executor()
                     .timer(Duration::from_millis(250))
                     .await;
+                client.ensure_liked_tracks_loaded();
                 let snapshot = client.playback();
+                let liked_revision = client.liked_revision();
                 let updated = this.update(cx, |this, cx| {
                     let relevant_change = this.playback.now_playing != snapshot.now_playing
                         || this.playback.is_playing != snapshot.is_playing
                         || this.playback.context_uri != snapshot.context_uri
                         || this.playback.shuffle != snapshot.shuffle;
                     this.playback = snapshot;
-                    if relevant_change {
+                    let liked_changed = this.liked_revision != liked_revision;
+                    if liked_changed {
+                        this.liked_revision = liked_revision;
+                        this.prune_unliked_rows();
+                    }
+                    if relevant_change || liked_changed {
                         cx.notify();
                     }
                 });
@@ -204,6 +221,105 @@ impl PlaylistScreen {
             }
         })
         .detach();
+    }
+
+    /// Drop tracks from the open Liked Songs page once membership says they are unliked.
+    /// Uses descending splices so the virtualized list keeps its scroll position.
+    fn prune_unliked_rows(&mut self) {
+        if !self
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.is_liked_songs)
+        {
+            return;
+        }
+        let gone = self
+            .detail
+            .as_ref()
+            .map(|detail| {
+                detail
+                    .tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, track)| {
+                        track.uri.starts_with("spotify:track:")
+                            && self.client.liked_status(&track.uri) == LikedStatus::NotLiked
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        if gone.is_empty() {
+            return;
+        }
+        let mut positions = self
+            .visible_indices
+            .iter()
+            .enumerate()
+            .filter(|(_, index)| gone.contains(index))
+            .map(|(position, _)| position + TRACK_OFFSET)
+            .collect::<Vec<_>>();
+        positions.sort_unstable();
+        for position in positions.into_iter().rev() {
+            self.list_state.splice(position..position + 1, 0);
+        }
+        let Some(detail) = self.detail.as_mut() else {
+            return;
+        };
+        let uris = detail
+            .tracks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, track)| gone.contains(&index).then(|| track.uri.clone()));
+        for uri in uris.collect::<HashSet<_>>() {
+            detail.remove_track_uri(&uri);
+        }
+        self.rebuild_visible();
+        if let Some(detail) = self.detail.as_ref() {
+            let client = self.client.clone();
+            let source = self.source.clone();
+            let detail = detail.clone();
+            std::thread::spawn(move || client.cache_playlist_detail(&source, &detail));
+        }
+    }
+
+    fn toggle_liked(&mut self, uri: String, currently_liked: bool, cx: &mut Context<Self>) {
+        if self.liked_pending.contains(&uri) {
+            return;
+        }
+        let target = !currently_liked;
+        let client = self.client.clone();
+        let worker_uri = uri.clone();
+        self.liked_pending.insert(uri.clone());
+        self.liked_overrides.insert(uri.clone(), target);
+        self.action_error = None;
+        let (tx, rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(client.set_liked(&worker_uri, target));
+        });
+        cx.spawn(async move |this, cx| {
+            let result = rx.await;
+            let _ = this.update(cx, |this, cx| {
+                this.liked_pending.remove(&uri);
+                this.liked_overrides.remove(&uri);
+                match result {
+                    Ok(Ok(())) => {
+                        this.liked_revision = this.client.liked_revision();
+                        this.prune_unliked_rows();
+                    }
+                    Ok(Err(error)) => {
+                        this.action_error = Some(format!("Couldn't update Liked Songs: {error}"));
+                        eprintln!("liked songs update failed");
+                    }
+                    Err(_) => {
+                        this.action_error = Some("Couldn't update Liked Songs".into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn item_count(&self) -> usize {
@@ -294,11 +410,20 @@ impl PlaylistScreen {
             return;
         }
         let old_item_count = self.item_count();
+        let is_liked_songs = self
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.is_liked_songs);
+        let mut page_tracks = page.tracks;
+        if is_liked_songs {
+            page_tracks
+                .retain(|track| self.client.liked_status(&track.uri) != LikedStatus::NotLiked);
+        }
         let Some(detail) = self.detail.as_mut() else {
             return;
         };
         let old_len = detail.tracks.len();
-        detail.tracks.extend(page.tracks);
+        detail.tracks.extend(page_tracks);
         detail.next_page_url = page.next_page_url;
         let new_len = detail.tracks.len();
         let added_at = &detail.added_at;
@@ -946,6 +1071,7 @@ impl PlaylistScreen {
             )
             .child(div().w(px(ALBUM_WIDTH)).child("Album"))
             .child(div().w(px(DATE_WIDTH)).child("Date added"))
+            .child(div().w(px(LIKED_WIDTH)).flex_shrink_0())
             .child(
                 div().w(px(DURATION_WIDTH)).flex().justify_end().child(
                     svg()
@@ -1017,6 +1143,20 @@ impl PlaylistScreen {
         let context_uri = detail.context_uri.clone();
         let track_uri = track.uri.clone();
         let playable = track.playable;
+        let track_likeable = track_uri.starts_with("spotify:track:");
+        let base_liked = self.client.liked_status(&track_uri);
+        let like_ready = base_liked != LikedStatus::Unknown;
+        let liked = self
+            .liked_overrides
+            .get(&track_uri)
+            .copied()
+            .or(match base_liked {
+                LikedStatus::Liked => Some(true),
+                LikedStatus::NotLiked => Some(false),
+                LikedStatus::Unknown if detail.is_liked_songs => Some(true),
+                LikedStatus::Unknown => None,
+            });
+        let like_pending = self.liked_pending.contains(&track_uri);
 
         let index_cell = div()
             .w(px(24.0))
@@ -1065,6 +1205,55 @@ impl PlaylistScreen {
                     .child("E")
             }));
 
+        let liked_cell = div()
+            .w(px(LIKED_WIDTH))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .children(track_likeable.then(|| {
+                let like_uri = track_uri.clone();
+                let icon = match liked {
+                    Some(true) => liked_check(18.0),
+                    Some(false) => div()
+                        .opacity(0.0)
+                        .group_hover("playlist-track", |style| style.opacity(1.0))
+                        .child(like_plus(18.0, MUTED))
+                        .into_any_element(),
+                    None => div()
+                        .opacity(0.35)
+                        .child(like_plus(18.0, MUTED))
+                        .into_any_element(),
+                };
+                div()
+                    .id(("playlist-like", track_index))
+                    .size(px(22.0))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(if like_pending { 0.45 } else { 1.0 })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if like_pending {
+                            return;
+                        }
+                        if !like_ready {
+                            this.client.ensure_liked_tracks_loaded();
+                            cx.notify();
+                            return;
+                        }
+                        let Some(currently_liked) = liked else {
+                            this.client.ensure_liked_tracks_loaded();
+                            cx.notify();
+                            return;
+                        };
+                        this.toggle_liked(like_uri.clone(), currently_liked, cx);
+                    }))
+                    .child(icon)
+            }));
+
         let row = div()
             .id(("playlist-track", track_index))
             .w_full()
@@ -1074,6 +1263,7 @@ impl PlaylistScreen {
             .items_center()
             .gap(px(16.0))
             .rounded(px(4.0))
+            .group("playlist-track")
             .cursor_pointer()
             .hover(|style| style.bg(rgba(0xffffff1a)))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1139,6 +1329,7 @@ impl PlaylistScreen {
                             .unwrap_or_default(),
                     ),
             )
+            .child(liked_cell)
             .child(
                 div()
                     .w(px(DURATION_WIDTH))
