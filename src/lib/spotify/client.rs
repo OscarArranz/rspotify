@@ -462,7 +462,13 @@ impl NativeSpotify {
         &self.inner.username
     }
 
-    /// Blocking native library fetch; callers must run this on a worker.
+    /// Fetches the user's saved library from Spotify's native rootlist endpoint.
+    ///
+    /// The endpoint returns a protobuf `SelectedListContent` (the same structure the
+    /// official client decodes). Names and artwork come from the decorated `meta_items`
+    /// that accompany each rootlist entry.
+    ///
+    /// Blocking native fetch; callers must run this on a worker.
     pub fn library_entries(&self) -> Result<Vec<super::library::LibraryEntry>, SpotifyError> {
         self.inner
             .runtime

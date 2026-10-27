@@ -1,3 +1,8 @@
+// `lib` is an ordinary module here; the crate has no library target. The name matches
+// the documented module layout (`src/lib/spotify/`), so opt out of the special-name lint
+// at crate level (an attribute on `mod lib;` is not honoured by rustc).
+#![allow(special_module_name)]
+
 mod hooks;
 mod lib;
 mod router;

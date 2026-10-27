@@ -102,6 +102,7 @@ impl StackRouter {
 
     /// Replaces the current screen with a new one.
     /// Similar to React Navigation's navigation.replace().
+    #[allow(dead_code)] // Router API surface; no screen replaces a screen yet.
     pub fn replace(&mut self, screen: AnyView, cx: &mut Context<Self>) {
         if let Some(slot) = self.screens.get_mut(self.current_screen) {
             *slot = screen;
@@ -116,6 +117,7 @@ impl StackRouter {
 
     /// Pops all screens and pushes a new root screen.
     /// Similar to React Navigation's navigation.reset().
+    #[allow(dead_code)] // Router API surface; no screen resets the stack yet.
     pub fn reset(&mut self, screen: AnyView, cx: &mut Context<Self>) {
         self.screens.clear();
         self.screens.push(screen);
@@ -125,6 +127,7 @@ impl StackRouter {
     }
 
     /// Returns the number of screens in the stack.
+    #[allow(dead_code)] // Router API surface; nothing reports depth yet.
     pub fn depth(&self) -> usize {
         self.screens.len()
     }
@@ -210,6 +213,7 @@ impl StackRouterHandle {
     }
 
     /// Replaces the current screen.
+    #[allow(dead_code)] // Router API surface; no screen replaces a screen yet.
     pub fn replace(&self, screen: AnyView, cx: &mut App) {
         self.router.update(cx, |router, cx| {
             router.replace(screen, cx);
@@ -217,6 +221,7 @@ impl StackRouterHandle {
     }
 
     /// Resets to a new root screen.
+    #[allow(dead_code)] // Router API surface; no screen resets the stack yet.
     pub fn reset(&self, screen: AnyView, cx: &mut App) {
         self.router.update(cx, |router, cx| {
             router.reset(screen, cx);
@@ -224,6 +229,7 @@ impl StackRouterHandle {
     }
 
     /// Returns the stack depth.
+    #[allow(dead_code)] // Router API surface; nothing reports depth yet.
     pub fn depth(&self, cx: &App) -> usize {
         self.router.read(cx).depth()
     }

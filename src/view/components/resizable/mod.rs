@@ -1,3 +1,7 @@
+// This is a vendored copy of gpui-component's resizable panel implementation. Keep the
+// full component API available even where this app does not use every builder method.
+#![allow(dead_code)]
+
 use std::ops::Range;
 
 use gpui::{

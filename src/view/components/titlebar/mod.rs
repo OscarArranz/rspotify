@@ -49,9 +49,6 @@ const BUTTON_HOVER_BG: u32 = 0x282828;
 /// Close button hover background (red).
 const CLOSE_BUTTON_HOVER_BG: u32 = 0xe81123;
 
-/// Disabled button color.
-const DISABLED_COLOR: u32 = 0x4d4d4d;
-
 // We need this piece of code to handle the dragging of the titlebar
 struct TitleBarState {
     should_move: bool,

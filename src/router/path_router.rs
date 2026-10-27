@@ -94,6 +94,7 @@ impl PathRouter {
     }
 
     /// Gets the current path.
+    #[allow(dead_code)] // Router API surface; no screen reads the path yet.
     pub fn current_path(&self) -> &str {
         &self.current_path
     }
@@ -159,6 +160,7 @@ impl PathRouterHandle {
     }
 
     /// Gets the current path.
+    #[allow(dead_code)] // Router API surface; no screen reads the path yet.
     pub fn current_path(&self, cx: &App) -> String {
         self.router.read(cx).current_path().to_string()
     }

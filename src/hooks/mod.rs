@@ -9,6 +9,9 @@
 //! Note: In GPUI, "hooks" are just helper functions that access context.
 //! Unlike React hooks, they don't have the same rules about ordering.
 
+// These are the documented helper API for screens; not every helper has a caller yet.
+#![allow(dead_code)]
+
 use gpui::{App, AppContext, Window};
 
 use crate::lib::spotify::NativeSpotify;
