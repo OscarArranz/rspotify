@@ -101,6 +101,20 @@ available before calling `Spirc::activate()`, so reading it does not require tra
 to the local device. This behavior is evidenced by the pinned librespot 0.8 source used by this
 project; it is not a claim that the public Web API exposes the same state.
 
+### Session lifetime and reconnect (spec 012)
+
+- librespot's `Session` becomes invalid when the access-point connection is lost or the keep-alive
+  handshake times out. Its Spirc task (`while !session.is_invalid()`) then exits and the Spirc
+  command channel is closed; later transport sends fail instead of reconnecting.
+- librespot's own CLI (`librespot/src/main.rs`, 0.8) treats this as a recovery point: it creates a
+  new `Session`, calls `player.set_session`, and builds a new `Spirc` around the same player.
+- rspotify follows that pattern. A supervisor watches for an invalid session, a finished Spirc
+  task, or a finished player thread, then refreshes the stored OAuth token through
+  `https://accounts.spotify.com/api/token`, rebuilds the session/Spirc, and resumes interrupted
+  playback. The rotation token returned by that exchange replaces the stored refresh token.
+- Pathfinder and SpClient tokens come from `login5().auth_token()`, which librespot renews on
+  demand, so those requests do not need a separate refresh path.
+
 ## Client id and redirect
 
 The desktop login UI and librespot both use:

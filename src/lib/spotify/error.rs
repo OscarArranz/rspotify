@@ -23,6 +23,10 @@ pub enum SpotifyError {
     #[error("Playback error: {0}")]
     Playback(String),
 
+    /// The librespot session was lost and is being rebuilt in the background. Callers may retry.
+    #[error("Spotify is reconnecting. Try again in a moment.")]
+    Reconnecting,
+
     #[error("Storage error: {0}")]
     Storage(String),
 }

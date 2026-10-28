@@ -148,3 +148,7 @@ The playback test starts audio. Pause or stop playback and do not leave the app 
 - `specs/011-like-unlike-songs/` — native Like/Unlike controls in the now-playing bar and playlist
   rows, with per-session membership, optimistic updates and Liked Songs pruning. Implemented;
   live write and visual validation pending.
+- `specs/012-session-reconnect/` — automatic librespot session rebuild after a dropped connection,
+  OAuth token refresh with rotation, playback resume and queued play requests, and sign-out routing
+  for a revoked token. Implemented; offline validation recorded; ignored live reconnect test not
+  run yet.

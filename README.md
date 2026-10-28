@@ -11,6 +11,7 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
   Playlist, album, artist and podcast cards open native detail/context pages.
 - **Local playback**: registers as a Spotify Connect device (`rspotify`) and streams through librespot to the default audio output.
 - **Persistent session**: the refresh token, stable device id, and cached profile details are stored in `~/.cache/rspotify/`. Returning users see the app immediately while the session refreshes in the background; the browser login is only needed once.
+- **Session recovery**: if the native connection drops while the app is open (sleep, network reset, idle timeout), rspotify rebuilds it in the background with the stored refresh token and resumes interrupted playback, without losing the open page or asking for sign-in again.
 - **Playlist detail**: saved playlists and Liked Songs open in a Spotify-style page with a large header, virtualized track list, local search, sort, context playback and per-row Like controls.
 - **Like/unlike songs**: the now-playing bar and every playlist/context page show Spotify's plus/check control backed by the native collection service. Unliking from Liked Songs removes the row from the open list.
 - **Artist profiles**: library and search artist results open a native artist page with a hero,

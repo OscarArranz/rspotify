@@ -11,7 +11,7 @@ use gpui::{
 
 use crate::{
     lib::spotify::{
-        NativeSpotify, PlaylistSource,
+        NativeSpotify, PlaylistSource, SpotifyError,
         home::{HomeFeed, HomeItem, HomePanel, HomeShelf},
     },
     router::StackRouterHandle,
@@ -146,12 +146,20 @@ impl HomeScreen {
                 } else {
                     client.play_context(&item.uri)
                 };
-                let _ = tx.send(result.is_ok());
+                let _ = tx.send(result);
             });
-            if !matches!(rx.await, Ok(true)) {
+            let message = match rx.await {
+                Ok(Ok(())) => None,
+                Ok(Err(SpotifyError::Reconnecting)) => Some(SpotifyError::Reconnecting.to_string()),
+                Ok(Err(SpotifyError::Playback(error))) => {
+                    Some(format!("Couldn't start playback: {error}"))
+                }
+                Ok(Err(error)) => Some(format!("Couldn't start playback: {error}")),
+                Err(_) => Some("Couldn't start playback. Try again.".into()),
+            };
+            if let Some(message) = message {
                 let _ = this.update(cx, |this, cx| {
-                    this.message =
-                        Some("Couldn't start playback. Spotify Premium is required.".into());
+                    this.message = Some(message);
                     cx.notify();
                 });
             }

@@ -3,7 +3,11 @@
 
 use std::{
     collections::HashSet,
-    sync::{Arc, Mutex},
+    path::Path,
+    sync::{
+        Arc, Mutex, RwLock, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -63,6 +67,10 @@ const OAUTH_SCOPES: &[&str] = &[
 ];
 
 const CONNECT_DEVICE_NAME: &str = "rspotify";
+/// How long worker-only reads wait for an in-flight reconnect before returning `Reconnecting`.
+const RECONNECT_WAIT: Duration = Duration::from_secs(8);
+const RECONNECT_MIN_BACKOFF: Duration = Duration::from_secs(2);
+const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const OAUTH_SUCCESS_HTML: &str = r#"<!doctype html>
 <html>
   <body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#121212;color:#fff;font-family:sans-serif">
@@ -249,14 +257,59 @@ impl PlaybackInner {
 }
 
 struct NativeInner {
-    session: Session,
-    spirc: Spirc,
+    /// The live librespot connection. `None` while a reconnect is in progress.
+    connection: RwLock<Option<SessionConnection>>,
+    /// Wakes the session supervisor when a command observes a lost connection.
+    reconnect_now: tokio::sync::Notify,
+    /// Set when Spotify rejects the stored refresh token; the UI returns to sign-in.
+    signed_out: AtomicBool,
+    /// A play/load request issued while disconnected, applied after the next reconnect.
+    pending_load: Mutex<Option<LoadRequest>>,
+    /// Created once and re-pointed at each reconnected session via `Player::set_session`.
+    player: Mutex<Arc<Player>>,
     mixer: Arc<SoftMixer>,
     playback: Arc<Mutex<PlaybackInner>>,
     runtime: Arc<tokio::runtime::Runtime>,
     username: String,
     liked_songs_detail: Mutex<Option<PlaylistDetail>>,
     liked: Arc<Mutex<LikedCache>>,
+}
+
+/// One established librespot session. `alive` stops polling tasks that belong to a dead session.
+#[derive(Clone)]
+struct SessionConnection {
+    session: Session,
+    spirc: Spirc,
+    alive: Arc<AtomicBool>,
+}
+
+struct OpenedConnection {
+    connection: SessionConnection,
+    spirc_task: tokio::task::JoinHandle<()>,
+}
+
+/// Playback state captured before a connection is replaced.
+struct ResumeTarget {
+    context_uri: Option<String>,
+    track_uri: String,
+    position_ms: u64,
+}
+
+enum ReconnectFailure {
+    SignedOut,
+    Retry(String),
+}
+
+impl From<SpotifyError> for ReconnectFailure {
+    fn from(error: SpotifyError) -> Self {
+        Self::Retry(error.to_string())
+    }
+}
+
+impl From<std::io::Error> for ReconnectFailure {
+    fn from(error: std::io::Error) -> Self {
+        Self::Retry(error.to_string())
+    }
 }
 
 /// Cloneable handle to an authenticated native Spotify session.
@@ -369,62 +422,20 @@ impl NativeSpotify {
         let cache_dir = session_cache_dir();
         std::fs::create_dir_all(&cache_dir)?;
         restrict_private_dir(&cache_dir);
-        let cache = Cache::new(
-            Some(cache_dir.as_path()),
-            Some(cache_dir.as_path()),
-            None,
-            None,
-        )?;
 
-        let session_config = SessionConfig {
-            client_id,
-            device_id,
-            tmp_dir: cache_dir,
-            autoplay: Some(true),
-            ..Default::default()
-        };
-        // librespot captures `tokio::runtime::Handle::current()`, so the session must be
-        // constructed while the runtime context is active.
-        let session = {
-            let _guard = runtime.enter();
-            Session::new(session_config, Some(cache))
-        };
-
-        let credentials = Credentials::with_access_token(access_token);
         let mixer = Arc::new(SoftMixer::open(MixerConfig::default())?);
         let initial_volume = initial_volume.min(100);
-        let initial_volume_value = (initial_volume as u32 * u16::MAX as u32 / 100) as u16;
+        let initial_volume_value = volume_value(initial_volume);
         mixer.set_volume(initial_volume_value);
-        let player_config = PlayerConfig {
-            position_update_interval: Some(Duration::from_millis(500)),
-            ..Default::default()
-        };
-        let soft_volume = mixer.get_soft_volume();
-        let sink_builder = audio_backend::find(None).ok_or_else(|| {
-            SpotifyError::Playback("no librespot audio backend is available".into())
-        })?;
-        let player = Player::new(player_config, session.clone(), soft_volume, move || {
-            sink_builder(None, AudioFormat::S16)
-        });
 
-        let connect_config = ConnectConfig {
-            name: CONNECT_DEVICE_NAME.to_string(),
-            device_type: DeviceType::Computer,
-            initial_volume: initial_volume_value,
-            ..Default::default()
+        // librespot captures `tokio::runtime::Handle::current()`, so the session must be
+        // constructed while the runtime context is active.
+        let (session, player) = {
+            let _guard = runtime.enter();
+            let session = build_session(&cache_dir, &device_id, &client_id)?;
+            let player = create_player(session.clone(), &mixer)?;
+            (session, player)
         };
-
-        let mixin: Arc<dyn Mixer> = mixer.clone();
-        let (spirc, spirc_task) = runtime
-            .block_on(Spirc::new(
-                connect_config,
-                session.clone(),
-                credentials,
-                player.clone(),
-                mixin,
-            ))
-            .map_err(|error| SpotifyError::Session(error.to_string()))?;
-        runtime.spawn(spirc_task);
 
         let playback = Arc::new(Mutex::new(PlaybackInner {
             snapshot: PlaybackSnapshot {
@@ -434,10 +445,19 @@ impl NativeSpotify {
             updated_at: Instant::now(),
             local_player_active: false,
         }));
-        spawn_player_event_loop(&runtime, &player, playback.clone());
-        spawn_connect_state_event_loop(&runtime, &spirc, &session, playback.clone());
 
-        let username = session.username();
+        let opened = runtime.block_on(connect_spirc(
+            &runtime,
+            session,
+            access_token,
+            player.clone(),
+            mixer.clone(),
+            playback.clone(),
+            initial_volume_value,
+        ))?;
+        spawn_player_event_loop(&runtime, &player, playback.clone());
+
+        let username = opened.connection.session.username();
         // Authentication already runs on a worker. Decode the collection here so opening
         // Liked Songs never needs to render a placeholder while waiting on disk I/O.
         let liked_songs_detail =
@@ -445,8 +465,11 @@ impl NativeSpotify {
 
         let client = Self {
             inner: Arc::new(NativeInner {
-                session,
-                spirc,
+                connection: RwLock::new(Some(opened.connection)),
+                reconnect_now: tokio::sync::Notify::new(),
+                signed_out: AtomicBool::new(false),
+                pending_load: Mutex::new(None),
+                player: Mutex::new(player),
                 mixer,
                 playback,
                 runtime,
@@ -455,8 +478,79 @@ impl NativeSpotify {
                 liked: Arc::new(Mutex::new(LikedCache::default())),
             }),
         };
+        spawn_session_supervisor(&client, opened.spirc_task);
         client.ensure_liked_tracks_loaded();
         Ok(client)
+    }
+
+    /// True while a librespot session is established and usable.
+    #[cfg(test)]
+    pub fn is_connected(&self) -> bool {
+        self.inner.live_connection().is_some()
+    }
+
+    /// True once Spotify has rejected the stored refresh token and sign-in is required.
+    pub fn is_signed_out(&self) -> bool {
+        self.inner.signed_out.load(Ordering::Relaxed)
+    }
+
+    /// Returns the live connection without waiting. UI-thread callers use this.
+    fn connection_now(&self) -> Result<SessionConnection, SpotifyError> {
+        match self.inner.live_connection() {
+            Some(connection) => Ok(connection),
+            None => {
+                self.inner.reconnect_now.notify_one();
+                Err(SpotifyError::Reconnecting)
+            }
+        }
+    }
+
+    /// Worker-only: waits briefly for an in-flight reconnect before returning the connection.
+    fn connection_blocking(&self) -> Result<SessionConnection, SpotifyError> {
+        self.inner.runtime.block_on(async {
+            let deadline = Instant::now() + RECONNECT_WAIT;
+            loop {
+                if let Some(connection) = self.inner.live_connection() {
+                    return Ok(connection);
+                }
+                self.inner.reconnect_now.notify_one();
+                if Instant::now() >= deadline {
+                    return Err(SpotifyError::Reconnecting);
+                }
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        })
+    }
+
+    /// Sends a transport command to the current Spirc, treating a closed channel as a lost
+    /// session instead of surfacing librespot's internal error.
+    fn with_spirc<T>(
+        &self,
+        command: impl FnOnce(&Spirc) -> Result<T, librespot::core::Error>,
+    ) -> Result<T, SpotifyError> {
+        let connection = self.connection_now()?;
+        command(&connection.spirc).map_err(|_| {
+            self.inner.reconnect_now.notify_one();
+            SpotifyError::Reconnecting
+        })
+    }
+
+    /// Queues a load when the session is down and replays it after the next reconnect.
+    fn send_load(&self, request: LoadRequest) -> Result<(), SpotifyError> {
+        let connection = match self.connection_now() {
+            Ok(connection) => connection,
+            Err(error) => {
+                *self.inner.pending_load.lock().unwrap() = Some(request);
+                return Err(error);
+            }
+        };
+        let _ = connection.spirc.activate();
+        if connection.spirc.load(request.clone()).is_err() {
+            self.inner.reconnect_now.notify_one();
+            *self.inner.pending_load.lock().unwrap() = Some(request);
+            return Err(SpotifyError::Reconnecting);
+        }
+        Ok(())
     }
 
     pub fn username(&self) -> &str {
@@ -471,15 +565,24 @@ impl NativeSpotify {
     ///
     /// Blocking native fetch; callers must run this on a worker.
     pub fn library_entries(&self) -> Result<Vec<super::library::LibraryEntry>, SpotifyError> {
-        self.inner
-            .runtime
-            .block_on(super::library::fetch(&self.inner.session))
+        let session = self.connection_blocking()?.session;
+        self.inner.runtime.block_on(super::library::fetch(&session))
     }
 
     pub(crate) fn library_catalog(&self) -> super::library_catalog::LibrarySupplement {
-        self.inner
-            .runtime
-            .block_on(super::library_catalog::fetch(&self.inner.session))
+        match self.connection_blocking() {
+            Ok(connection) => self
+                .inner
+                .runtime
+                .block_on(super::library_catalog::fetch(&connection.session)),
+            Err(_) => super::library_catalog::LibrarySupplement {
+                entries: Vec::new(),
+                loaded_categories: HashSet::new(),
+                pins: None,
+                failures: 1,
+                recents_available: false,
+            },
+        }
     }
 
     /// Blocking account mutation; only explicit user Pin/Unpin actions may invoke this worker API.
@@ -488,27 +591,39 @@ impl NativeSpotify {
         uri: &str,
         pinned: bool,
     ) -> Result<std::collections::HashSet<String>, SpotifyError> {
-        self.inner.runtime.block_on(super::collection::set_pinned(
-            &self.inner.session,
-            uri,
-            pinned,
-        ))
+        let session = self.connection_blocking()?.session;
+        self.inner
+            .runtime
+            .block_on(super::collection::set_pinned(&session, uri, pinned))
     }
 
-    /// Enrich a small visible batch without holding up the first library render.
+    /// Enrich a small visible batch without holding up the first library render. Best-effort:
+    /// during a reconnect it reports failures instead of stalling the per-entry loop.
     pub(crate) fn hydrate_library_entries(
         &self,
         entries: &mut [super::library::LibraryEntry],
         cache: &mut super::library::LibraryHydrator,
     ) -> usize {
+        let Some(connection) = self.inner.live_connection() else {
+            self.inner.reconnect_now.notify_one();
+            return usize::from(!entries.is_empty());
+        };
         self.inner
             .runtime
-            .block_on(super::library::hydrate(&self.inner.session, entries, cache))
+            .block_on(super::library::hydrate(&connection.session, entries, cache))
     }
 
     /// Start the one-per-session liked membership load. Retries are throttled; the GPUI thread
     /// never waits on the network here.
     pub fn ensure_liked_tracks_loaded(&self) {
+        let Some(session) = self
+            .inner
+            .live_connection()
+            .map(|connection| connection.session)
+        else {
+            self.inner.reconnect_now.notify_one();
+            return;
+        };
         {
             let mut cache = self.inner.liked.lock().unwrap();
             if cache.loaded || cache.loading {
@@ -523,7 +638,6 @@ impl NativeSpotify {
             cache.loading = true;
             cache.last_attempt = Some(Instant::now());
         }
-        let session = self.inner.session.clone();
         let liked = self.inner.liked.clone();
         self.inner.runtime.spawn(async move {
             let result = super::collection::snapshot(&session, "collection").await;
@@ -571,11 +685,10 @@ impl NativeSpotify {
                 "Liked Songs are still loading; try again in a moment".into(),
             ));
         }
-        self.inner.runtime.block_on(super::collection::set_liked(
-            &self.inner.session,
-            uri,
-            liked,
-        ))?;
+        let session = self.connection_blocking()?.session;
+        self.inner
+            .runtime
+            .block_on(super::collection::set_liked(&session, uri, liked))?;
         {
             let mut cache = self.inner.liked.lock().unwrap();
             if cache.loaded {
@@ -618,13 +731,17 @@ impl NativeSpotify {
             cache.refresh_generation = cache.refresh_generation.wrapping_add(1);
             cache.refresh_generation
         };
-        let session = self.inner.session.clone();
+        let inner = self.inner.clone();
         let liked = self.inner.liked.clone();
         self.inner.runtime.spawn(async move {
             tokio::time::sleep(Duration::from_millis(1_200)).await;
             if liked.lock().unwrap().refresh_generation != generation {
                 return;
             }
+            let Some(session) = inner.live_connection().map(|connection| connection.session) else {
+                inner.reconnect_now.notify_one();
+                return;
+            };
             let Ok(items) = super::collection::snapshot(&session, "collection").await else {
                 return;
             };
@@ -643,18 +760,16 @@ impl NativeSpotify {
 
     /// Searches Spotify's own Pathfinder endpoint. Blocking; call from a worker thread.
     pub fn search(&self, query: &str) -> Result<SearchResults, SpotifyError> {
-        self.inner
-            .runtime
-            .block_on(search::search(&self.inner.session, query))
+        let session = self.connection_blocking()?.session;
+        self.inner.runtime.block_on(search::search(&session, query))
     }
 
     /// Fetches the current user's profile and avatar through Spotify's native endpoints.
     pub fn user_profile(&self) -> Result<UserProfile, SpotifyError> {
-        self.inner.runtime.block_on(async {
-            let username = self.inner.session.username();
-            let bytes = self
-                .inner
-                .session
+        let session = self.connection_blocking()?.session;
+        self.inner.runtime.block_on(async move {
+            let username = session.username();
+            let bytes = session
                 .spclient()
                 .get_user_profile(&username, None, None)
                 .await
@@ -693,9 +808,10 @@ impl NativeSpotify {
     }
 
     pub(crate) fn home(&self, facet: &str) -> Result<super::home::HomeFeed, SpotifyError> {
+        let session = self.connection_blocking()?.session;
         self.inner
             .runtime
-            .block_on(super::home::fetch(&self.inner.session, facet))
+            .block_on(super::home::fetch(&session, facet))
     }
 
     pub(crate) fn home_section(
@@ -703,16 +819,18 @@ impl NativeSpotify {
         uri: &str,
         offset: u64,
     ) -> Result<(Vec<super::home::HomeItem>, Option<u64>), SpotifyError> {
+        let session = self.connection_blocking()?.session;
         self.inner
             .runtime
-            .block_on(super::home::section(&self.inner.session, uri, offset))
+            .block_on(super::home::section(&session, uri, offset))
     }
 
     /// Fetches a saved playlist, or the current user's Liked Songs, plus its first context page.
     pub fn playlist_detail(&self, source: PlaylistSource) -> Result<PlaylistDetail, SpotifyError> {
+        let session = self.connection_blocking()?.session;
         self.inner
             .runtime
-            .block_on(playlist::fetch_playlist_detail(&self.inner.session, source))
+            .block_on(playlist::fetch_playlist_detail(&session, source))
     }
 
     /// Fetches an artist's profile overview.
@@ -721,9 +839,10 @@ impl NativeSpotify {
     /// Pathfinder request. The returned profile keeps every section independent so a
     /// missing or malformed section does not invalidate the rest of the page.
     pub fn artist_profile(&self, uri: &str) -> Result<ArtistProfile, SpotifyError> {
+        let session = self.connection_blocking()?.session;
         self.inner
             .runtime
-            .block_on(artist::fetch_artist_profile(&self.inner.session, uri))
+            .block_on(artist::fetch_artist_profile(&session, uri))
     }
 
     pub fn cached_playlist_detail(&self, source: &PlaylistSource) -> Option<PlaylistDetail> {
@@ -744,10 +863,10 @@ impl NativeSpotify {
 
     /// Fetches one additional context page for an already-loaded playlist.
     pub fn playlist_next_page(&self, next_page_url: &str) -> Result<PlaylistPage, SpotifyError> {
-        self.inner.runtime.block_on(playlist::fetch_playlist_page(
-            &self.inner.session,
-            next_page_url,
-        ))
+        let session = self.connection_blocking()?.session;
+        self.inner
+            .runtime
+            .block_on(playlist::fetch_playlist_page(&session, next_page_url))
     }
 
     /// The native context URI for the current user's Liked Songs.
@@ -768,54 +887,48 @@ impl NativeSpotify {
 
     /// Plays an album, playlist, artist or show context URI.
     pub fn play_context(&self, uri: &str) -> Result<(), SpotifyError> {
-        let _ = self.inner.spirc.activate();
         let options = LoadRequestOptions {
             start_playing: true,
             ..Default::default()
         };
-        self.inner
-            .spirc
-            .load(LoadRequest::from_context_uri(uri.to_string(), options))
-            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
-        self.set_context_uri(Some(uri.to_string()));
-        Ok(())
+        let result = self.send_load(LoadRequest::from_context_uri(uri.to_string(), options));
+        if result.is_ok() {
+            self.set_context_uri(Some(uri.to_string()));
+        }
+        result
     }
 
     /// Plays a context starting at a specific track.
     pub fn play_context_at(&self, context_uri: &str, track_uri: &str) -> Result<(), SpotifyError> {
-        let _ = self.inner.spirc.activate();
         let options = LoadRequestOptions {
             start_playing: true,
             playing_track: Some(PlayingTrack::Uri(track_uri.to_string())),
             ..Default::default()
         };
-        self.inner
-            .spirc
-            .load(LoadRequest::from_context_uri(
-                context_uri.to_string(),
-                options,
-            ))
-            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
-        self.set_context_uri(Some(context_uri.to_string()));
-        Ok(())
+        let result = self.send_load(LoadRequest::from_context_uri(
+            context_uri.to_string(),
+            options,
+        ));
+        if result.is_ok() {
+            self.set_context_uri(Some(context_uri.to_string()));
+        }
+        result
     }
 
     fn play_uris(&self, uris: Vec<String>) -> Result<(), SpotifyError> {
         if uris.is_empty() {
             return Ok(());
         }
-        let _ = self.inner.spirc.activate();
         let options = LoadRequestOptions {
             start_playing: true,
             playing_track: Some(PlayingTrack::Uri(uris[0].clone())),
             ..Default::default()
         };
-        self.inner
-            .spirc
-            .load(LoadRequest::from_tracks(uris, options))
-            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
-        self.set_context_uri(None);
-        Ok(())
+        let result = self.send_load(LoadRequest::from_tracks(uris, options));
+        if result.is_ok() {
+            self.set_context_uri(None);
+        }
+        result
     }
 
     fn set_context_uri(&self, context_uri: Option<String>) {
@@ -826,10 +939,7 @@ impl NativeSpotify {
     pub fn play_pause(&self) -> Result<(), SpotifyError> {
         let snapshot = self.playback();
         if snapshot.is_playing {
-            self.inner
-                .spirc
-                .play_pause()
-                .map_err(|error| SpotifyError::Playback(error.to_string()))
+            self.with_spirc(Spirc::play_pause)
         } else {
             self.start_snapshot_playback(snapshot)
         }
@@ -841,11 +951,7 @@ impl NativeSpotify {
 
     fn start_snapshot_playback(&self, snapshot: PlaybackSnapshot) -> Result<(), SpotifyError> {
         let Some(track) = snapshot.now_playing else {
-            return self
-                .inner
-                .spirc
-                .play()
-                .map_err(|error| SpotifyError::Playback(error.to_string()));
+            return self.with_spirc(Spirc::play);
         };
 
         let options = LoadRequestOptions {
@@ -861,81 +967,333 @@ impl NativeSpotify {
             _ => LoadRequest::from_tracks(vec![track.uri], options),
         };
 
-        self.inner
-            .spirc
-            .activate()
-            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
-        self.inner
-            .spirc
-            .load(request)
-            .map_err(|error| SpotifyError::Playback(error.to_string()))
+        self.send_load(request)
     }
 
     pub fn pause(&self) -> Result<(), SpotifyError> {
-        self.inner
-            .spirc
-            .pause()
-            .map_err(|error| SpotifyError::Playback(error.to_string()))
+        self.with_spirc(Spirc::pause)
     }
 
     pub fn next(&self) -> Result<(), SpotifyError> {
-        self.inner
-            .spirc
-            .next()
-            .map_err(|error| SpotifyError::Playback(error.to_string()))
+        self.with_spirc(Spirc::next)
     }
 
     pub fn previous(&self) -> Result<(), SpotifyError> {
-        self.inner
-            .spirc
-            .prev()
-            .map_err(|error| SpotifyError::Playback(error.to_string()))
+        self.with_spirc(Spirc::prev)
     }
 
     pub fn seek(&self, position_ms: u64) -> Result<(), SpotifyError> {
-        self.inner
-            .spirc
-            .set_position_ms(position_ms.min(u32::MAX as u64) as u32)
-            .map_err(|error| SpotifyError::Playback(error.to_string()))
+        let position_ms = position_ms.min(u32::MAX as u64) as u32;
+        self.with_spirc(|spirc| spirc.set_position_ms(position_ms))
     }
 
     pub fn set_volume_percent(&self, percent: u8) -> Result<(), SpotifyError> {
-        let value = (percent.min(100) as u32 * u16::MAX as u32 / 100) as u16;
-        self.inner
-            .spirc
-            .set_volume(value)
-            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
+        let percent = percent.min(100);
+        let value = volume_value(percent);
+        let result = self.with_spirc(|spirc| spirc.set_volume(value));
+        // Remember the requested volume even if the session is being rebuilt.
         let mut store = SessionStore::load();
-        store.set_volume_percent(percent.min(100));
+        store.set_volume_percent(percent);
         let mut playback = self.inner.playback.lock().unwrap();
-        playback.snapshot.volume_percent = percent.min(100);
-        Ok(())
+        playback.snapshot.volume_percent = percent;
+        result
     }
 
     /// Applies volume directly to the local soft mixer without sending a Connect command.
     /// Use this for responsive drag previews, then call `set_volume_percent` on release.
     pub fn set_local_volume_percent(&self, percent: u8) {
-        let value = (percent.min(100) as u32 * u16::MAX as u32 / 100) as u16;
-        self.inner.mixer.set_volume(value);
+        self.inner.mixer.set_volume(volume_value(percent.min(100)));
     }
 
     pub fn set_shuffle(&self, shuffle: bool) -> Result<(), SpotifyError> {
-        self.inner
-            .spirc
-            .shuffle(shuffle)
-            .map_err(|error| SpotifyError::Playback(error.to_string()))
+        self.with_spirc(|spirc| spirc.shuffle(shuffle))
     }
 
     pub fn set_repeat_mode(&self, mode: RepeatMode) -> Result<(), SpotifyError> {
-        self.inner
-            .spirc
-            .repeat(matches!(mode, RepeatMode::Context))
-            .map_err(|error| SpotifyError::Playback(error.to_string()))?;
-        self.inner
-            .spirc
-            .repeat_track(matches!(mode, RepeatMode::Track))
-            .map_err(|error| SpotifyError::Playback(error.to_string()))
+        self.with_spirc(|spirc| spirc.repeat(matches!(mode, RepeatMode::Context)))?;
+        self.with_spirc(|spirc| spirc.repeat_track(matches!(mode, RepeatMode::Track)))
     }
+}
+
+/// Converts a 0–100 volume percentage to librespot's 16-bit mixer range.
+fn volume_value(percent: u8) -> u16 {
+    (percent.min(100) as u32 * u16::MAX as u32 / 100) as u16
+}
+
+impl NativeInner {
+    /// A connection that has not yet been invalidated. Empty during a reconnect.
+    fn live_connection(&self) -> Option<SessionConnection> {
+        self.connection
+            .read()
+            .unwrap()
+            .as_ref()
+            .filter(|connection| !connection.session.is_invalid())
+            .cloned()
+    }
+
+    fn needs_reconnect(&self, spirc_task: Option<&tokio::task::JoinHandle<()>>) -> bool {
+        if spirc_task.is_some_and(|task| task.is_finished()) {
+            return true;
+        }
+        if self.player.lock().unwrap().is_invalid() {
+            return true;
+        }
+        match self.connection.read().unwrap().as_ref() {
+            None => true,
+            Some(connection) => connection.session.is_invalid(),
+        }
+    }
+
+    /// Drops the current connection and freezes playback before a rebuild.
+    fn detach_connection(&self) -> Option<ResumeTarget> {
+        let resume = freeze_for_reconnect(&self.playback);
+        if let Some(connection) = self.connection.write().unwrap().take() {
+            connection.alive.store(false, Ordering::Relaxed);
+            if !connection.session.is_invalid() {
+                connection.session.shutdown();
+            }
+        }
+        resume
+    }
+
+    /// Applies a user load queued during the reconnect, or resumes interrupted playback.
+    fn resume_playback(&self, connection: &SessionConnection, resume: Option<ResumeTarget>) {
+        let pending = self.pending_load.lock().unwrap().take();
+        let request = pending.or_else(|| resume.map(resume_load_request));
+        let Some(request) = request else {
+            return;
+        };
+        let _ = connection.spirc.activate();
+        if connection.spirc.load(request).is_err() {
+            self.reconnect_now.notify_one();
+        }
+    }
+}
+
+/// Captures the position of an interrupted track and pauses the local snapshot. The track,
+/// context, and volume stay visible while the session is rebuilt.
+fn freeze_for_reconnect(playback: &Mutex<PlaybackInner>) -> Option<ResumeTarget> {
+    let mut inner = playback.lock().unwrap();
+    let now = Instant::now();
+    let snapshot = inner.snapshot_at(now);
+    let resume = if snapshot.is_playing {
+        snapshot.now_playing.as_ref().map(|track| ResumeTarget {
+            context_uri: snapshot.context_uri.clone(),
+            track_uri: track.uri.clone(),
+            position_ms: snapshot.position_ms,
+        })
+    } else {
+        None
+    };
+    inner.snapshot.position_ms = snapshot.position_ms;
+    inner.snapshot.is_playing = false;
+    inner.local_player_active = false;
+    inner.updated_at = now;
+    resume
+}
+
+fn resume_load_request(target: ResumeTarget) -> LoadRequest {
+    let track_uri = target.track_uri;
+    let options = LoadRequestOptions {
+        start_playing: true,
+        seek_to: target.position_ms.min(u32::MAX as u64) as u32,
+        playing_track: Some(PlayingTrack::Uri(track_uri.clone())),
+        ..Default::default()
+    };
+    match target.context_uri.filter(|uri| !uri.is_empty()) {
+        Some(context_uri) => LoadRequest::from_context_uri(context_uri, options),
+        None => LoadRequest::from_tracks(vec![track_uri], options),
+    }
+}
+
+fn build_session(
+    cache_dir: &Path,
+    device_id: &str,
+    client_id: &str,
+) -> Result<Session, SpotifyError> {
+    let cache = Cache::new(Some(cache_dir), Some(cache_dir), None, None)?;
+    let session_config = SessionConfig {
+        client_id: client_id.to_string(),
+        device_id: device_id.to_string(),
+        tmp_dir: cache_dir.to_path_buf(),
+        autoplay: Some(true),
+        ..Default::default()
+    };
+    Ok(Session::new(session_config, Some(cache)))
+}
+
+fn create_player(session: Session, mixer: &Arc<SoftMixer>) -> Result<Arc<Player>, SpotifyError> {
+    let player_config = PlayerConfig {
+        position_update_interval: Some(Duration::from_millis(500)),
+        ..Default::default()
+    };
+    let soft_volume = mixer.get_soft_volume();
+    let sink_builder = audio_backend::find(None)
+        .ok_or_else(|| SpotifyError::Playback("no librespot audio backend is available".into()))?;
+    Ok(Player::new(
+        player_config,
+        session,
+        soft_volume,
+        move || sink_builder(None, AudioFormat::S16),
+    ))
+}
+
+/// Builds a Connect device around an already-created `Session` and spawns its task.
+async fn connect_spirc(
+    runtime: &Arc<tokio::runtime::Runtime>,
+    session: Session,
+    access_token: String,
+    player: Arc<Player>,
+    mixer: Arc<SoftMixer>,
+    playback: Arc<Mutex<PlaybackInner>>,
+    initial_volume: u16,
+) -> Result<OpenedConnection, SpotifyError> {
+    let connect_config = ConnectConfig {
+        name: CONNECT_DEVICE_NAME.to_string(),
+        device_type: DeviceType::Computer,
+        initial_volume,
+        ..Default::default()
+    };
+    let mixin: Arc<dyn Mixer> = mixer;
+    let credentials = Credentials::with_access_token(access_token);
+    let (spirc, spirc_task) =
+        Spirc::new(connect_config, session.clone(), credentials, player, mixin)
+            .await
+            .map_err(|error| SpotifyError::Session(error.to_string()))?;
+
+    let connection = SessionConnection {
+        session,
+        spirc,
+        alive: Arc::new(AtomicBool::new(true)),
+    };
+    spawn_connect_state_event_loop(runtime, &connection, playback);
+    Ok(OpenedConnection {
+        spirc_task: runtime.spawn(spirc_task),
+        connection,
+    })
+}
+
+/// Watches the live connection and rebuilds it after librespot invalidates the session.
+fn spawn_session_supervisor(client: &NativeSpotify, spirc_task: tokio::task::JoinHandle<()>) {
+    let weak: Weak<NativeInner> = Arc::downgrade(&client.inner);
+    client.inner.runtime.spawn(async move {
+        let mut spirc_task = Some(spirc_task);
+        let mut backoff = RECONNECT_MIN_BACKOFF;
+        // Playback interrupted by the first failure; kept until a session accepts the resume so
+        // retrying the reconnect does not keep re-freezing an already paused snapshot.
+        let mut resume = None;
+
+        loop {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                _ = inner.reconnect_now.notified() => {}
+            }
+            if inner.signed_out.load(Ordering::Relaxed) {
+                return;
+            }
+            if !inner.needs_reconnect(spirc_task.as_ref()) {
+                continue;
+            }
+
+            if let Some(target) = inner.detach_connection() {
+                resume = Some(target);
+            }
+            if let Some(task) = spirc_task.take() {
+                task.abort();
+            }
+
+            match reconnect(&inner).await {
+                Ok(opened) => {
+                    let connection = opened.connection;
+                    *inner.connection.write().unwrap() = Some(connection.clone());
+                    spirc_task = Some(opened.spirc_task);
+                    backoff = RECONNECT_MIN_BACKOFF;
+                    eprintln!("Spotify session reconnected");
+                    inner.resume_playback(&connection, resume.take());
+                }
+                Err(ReconnectFailure::SignedOut) => {
+                    SessionStore::load().clear_refresh_token();
+                    inner.signed_out.store(true, Ordering::Relaxed);
+                    eprintln!("Spotify session expired; sign-in required");
+                    return;
+                }
+                Err(ReconnectFailure::Retry(error)) => {
+                    eprintln!("Spotify session reconnect failed ({error}); retrying");
+                    tokio::time::sleep(backoff).await;
+                    backoff = next_reconnect_backoff(backoff);
+                }
+            }
+        }
+    });
+}
+
+fn next_reconnect_backoff(current: Duration) -> Duration {
+    (current * 2).min(RECONNECT_MAX_BACKOFF)
+}
+
+/// Refreshes the OAuth token and rebuilds the librespot connection.
+async fn reconnect(inner: &NativeInner) -> Result<OpenedConnection, ReconnectFailure> {
+    let stored_refresh = SessionStore::load()
+        .refresh_token()
+        .map(str::to_owned)
+        .ok_or(ReconnectFailure::SignedOut)?;
+    let (client_id, oauth) =
+        oauth_client(false).map_err(|error| ReconnectFailure::Retry(error.to_string()))?;
+    let token = oauth
+        .refresh_token_async(&stored_refresh)
+        .await
+        .map_err(|error| {
+            if is_rejected_refresh(&error) {
+                ReconnectFailure::SignedOut
+            } else {
+                ReconnectFailure::Retry(format!("OAuth refresh failed: {error}"))
+            }
+        })?;
+
+    let mut store = SessionStore::load();
+    let refresh_token = if token.refresh_token.is_empty() {
+        stored_refresh
+    } else {
+        token.refresh_token
+    };
+    store.set_refresh_token(&refresh_token);
+    let device_id = store.ensure_device_id();
+
+    let cache_dir = session_cache_dir();
+    std::fs::create_dir_all(&cache_dir)?;
+    restrict_private_dir(&cache_dir);
+    let session = build_session(&cache_dir, &device_id, &client_id)?;
+
+    let player = {
+        let mut guard = inner.player.lock().unwrap();
+        if guard.is_invalid() {
+            let replacement = create_player(session.clone(), &inner.mixer)?;
+            *guard = replacement.clone();
+            spawn_player_event_loop(&inner.runtime, &replacement, inner.playback.clone());
+            replacement
+        } else {
+            guard.clone()
+        }
+    };
+    // Match librespot's own reconnect path: point the live player at the new session before the
+    // Connect device is built around it.
+    player.set_session(session.clone());
+
+    let volume = inner.playback.lock().unwrap().snapshot.volume_percent;
+    connect_spirc(
+        &inner.runtime,
+        session,
+        token.access_token,
+        player,
+        inner.mixer.clone(),
+        inner.playback.clone(),
+        volume_value(volume),
+    )
+    .await
+    .map_err(ReconnectFailure::from)
 }
 
 fn spawn_player_event_loop(
@@ -1033,16 +1391,21 @@ fn apply_player_event(inner: &mut PlaybackInner, event: PlayerEvent, now: Instan
 
 fn spawn_connect_state_event_loop(
     runtime: &Arc<tokio::runtime::Runtime>,
-    spirc: &Spirc,
-    session: &Session,
+    connection: &SessionConnection,
     playback: Arc<Mutex<PlaybackInner>>,
 ) {
-    let spirc = spirc.clone();
-    let session = session.clone();
+    let spirc = connection.spirc.clone();
+    let session = connection.session.clone();
+    let alive = connection.alive.clone();
     runtime.spawn(async move {
         let mut resolved_uri = String::new();
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
+            // Stop polling a connection that has been replaced so stale server state cannot
+            // overwrite the reconnected session's playback snapshot.
+            if !alive.load(Ordering::Relaxed) {
+                return;
+            }
             let Some(remote) = spirc.remote_player_state() else {
                 continue;
             };
@@ -1283,6 +1646,111 @@ mod tests {
     use super::*;
 
     const TEST_TRACK_URI: &str = "spotify:track:0000000000000000000000";
+
+    fn live_session(client: &NativeSpotify) -> Session {
+        client
+            .connection_blocking()
+            .expect("live Spotify session")
+            .session
+    }
+
+    #[test]
+    fn freeze_for_reconnect_pauses_and_keeps_resume_target() {
+        let start = Instant::now();
+        let playback = Mutex::new(PlaybackInner {
+            snapshot: PlaybackSnapshot {
+                now_playing: Some(NowPlaying {
+                    uri: TEST_TRACK_URI.into(),
+                    duration_ms: 180_000,
+                    ..Default::default()
+                }),
+                is_playing: true,
+                position_ms: 61_000,
+                context_uri: Some("spotify:playlist:example".into()),
+                volume_percent: 32,
+                ..Default::default()
+            },
+            updated_at: start,
+            local_player_active: true,
+        });
+
+        let resume = freeze_for_reconnect(&playback).expect("playing track resumes");
+
+        assert_eq!(resume.track_uri, TEST_TRACK_URI);
+        assert_eq!(
+            resume.context_uri.as_deref(),
+            Some("spotify:playlist:example")
+        );
+        assert!(resume.position_ms >= 61_000);
+        let inner = playback.lock().unwrap();
+        assert!(!inner.snapshot.is_playing);
+        assert!(!inner.local_player_active);
+        assert_eq!(inner.snapshot.position_ms, resume.position_ms);
+        assert_eq!(inner.snapshot.volume_percent, 32);
+        assert!(inner.snapshot.now_playing.is_some());
+    }
+
+    #[test]
+    fn freeze_for_reconnect_does_not_resume_paused_playback() {
+        let start = Instant::now();
+        let playback = Mutex::new(PlaybackInner {
+            snapshot: PlaybackSnapshot {
+                now_playing: Some(NowPlaying {
+                    uri: TEST_TRACK_URI.into(),
+                    ..Default::default()
+                }),
+                is_playing: false,
+                position_ms: 12_000,
+                ..Default::default()
+            },
+            updated_at: start,
+            local_player_active: true,
+        });
+
+        assert!(freeze_for_reconnect(&playback).is_none());
+        let inner = playback.lock().unwrap();
+        assert!(!inner.local_player_active);
+        assert_eq!(inner.snapshot.position_ms, 12_000);
+    }
+
+    #[test]
+    fn resume_request_uses_context_or_track_and_position() {
+        let request = resume_load_request(ResumeTarget {
+            context_uri: Some("spotify:album:example".into()),
+            track_uri: TEST_TRACK_URI.into(),
+            position_ms: 42_000,
+        });
+        assert!(request.start_playing);
+        assert_eq!(request.seek_to, 42_000);
+        assert!(matches!(
+            &request.playing_track,
+            Some(PlayingTrack::Uri(uri)) if uri == TEST_TRACK_URI
+        ));
+
+        let request = resume_load_request(ResumeTarget {
+            context_uri: Some(String::new()),
+            track_uri: TEST_TRACK_URI.into(),
+            position_ms: 1_000,
+        });
+        assert!(request.start_playing);
+        assert_eq!(request.seek_to, 1_000);
+    }
+
+    #[test]
+    fn reconnect_backoff_doubles_and_caps() {
+        let mut delay = RECONNECT_MIN_BACKOFF;
+        assert_eq!(delay, Duration::from_secs(2));
+        delay = next_reconnect_backoff(delay);
+        assert_eq!(delay, Duration::from_secs(4));
+        delay = next_reconnect_backoff(delay);
+        assert_eq!(delay, Duration::from_secs(8));
+        delay = next_reconnect_backoff(delay);
+        assert_eq!(delay, Duration::from_secs(16));
+        delay = next_reconnect_backoff(delay);
+        assert_eq!(delay, Duration::from_secs(30));
+        delay = next_reconnect_backoff(delay);
+        assert_eq!(delay, Duration::from_secs(30));
+    }
 
     fn playback_clock(now: Instant) -> PlaybackInner {
         PlaybackInner {
@@ -1669,15 +2137,12 @@ mod tests {
     #[ignore = "requires read-only Spotify account/network approval"]
     fn smoke_native_library_collection_contract() {
         let client = NativeSpotify::authenticate().expect("native login");
+        let session = live_session(&client);
         for set in ["artist", "show", "ylpin", "collection", "prerelease"] {
             let page = client
                 .inner
                 .runtime
-                .block_on(super::super::collection::page(
-                    &client.inner.session,
-                    set,
-                    "",
-                ))
+                .block_on(super::super::collection::page(&session, set, ""))
                 .expect("native collection page");
             let mut types = std::collections::BTreeMap::new();
             let mut contexts = std::collections::BTreeMap::new();
@@ -1704,8 +2169,9 @@ mod tests {
     #[ignore = "requires read-only Spotify account/network approval"]
     fn smoke_native_library_recents_contract() {
         let client = NativeSpotify::authenticate().expect("native login");
+        let session = live_session(&client);
         let response = client.inner.runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(15), client.inner.session.spclient().request_as_json(
+            tokio::time::timeout(Duration::from_secs(15), session.spclient().request_as_json(
                 &reqwest::Method::GET,
                 "/recently-played/v3/recently-played?limit=50&filter=default,collection-new-episodes",
                 None, None,
@@ -1961,6 +2427,46 @@ mod tests {
             "playback did not pause: {snapshot:#?}"
         );
         eprintln!("paused at {}ms", snapshot.position_ms);
+    }
+
+    #[test]
+    #[ignore = "requires a saved session and read-only account/network access"]
+    fn smoke_native_session_reconnect() {
+        let client = NativeSpotify::restore().expect("saved native session");
+        assert!(client.is_connected(), "initial session was not established");
+        assert!(
+            client.search("daft punk").is_ok(),
+            "Pathfinder failed before the forced reconnect"
+        );
+
+        // Simulates the invalidation librespot performs when the access-point connection
+        // is lost. The supervisor should rebuild the session without user interaction.
+        live_session(&client).shutdown();
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !client.is_connected() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        assert!(
+            client.is_connected(),
+            "session was not re-established within 60 seconds"
+        );
+        assert!(
+            !client.is_signed_out(),
+            "reconnect incorrectly cleared the session"
+        );
+
+        let results = client.search("daft punk").expect("search after reconnect");
+        assert!(
+            !results.is_empty(),
+            "search returned no results after reconnect"
+        );
+        eprintln!(
+            "reconnect ok: {} tracks, {} artists after a forced session shutdown",
+            results.tracks.len(),
+            results.artists.len()
+        );
+        // Read-only: no playback or account mutation is issued by this test.
     }
 
     #[test]

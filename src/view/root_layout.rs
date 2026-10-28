@@ -4,6 +4,8 @@
 //! - The custom titlebar (always visible)
 //! - The path router for main content
 
+use std::time::Duration;
+
 use futures::channel::oneshot;
 use gpui::{
     AsyncApp, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, prelude::*,
@@ -88,6 +90,34 @@ impl RootLayout {
             })
             .detach();
         }
+
+        // The reconnect supervisor can discover that Spotify revoked the saved session. Return
+        // to sign-in through the same path as a rejected token at startup.
+        let router_handle = cx.global::<PathRouterHandle>().clone();
+        let window_handle = window.window_handle();
+        cx.spawn(async move |_this, cx: &mut AsyncApp| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let Ok(signed_out) = cx.update(|cx| {
+                    cx.try_global::<AppState>()
+                        .and_then(AppState::spotify_client)
+                        .is_some_and(|client| client.is_signed_out())
+                }) else {
+                    return;
+                };
+                if !signed_out {
+                    continue;
+                }
+                let _ = cx.update(|cx| {
+                    cx.update_global::<AppState, _>(|state, _| state.logout());
+                });
+                let _ = window_handle.update(cx, |_, window, cx| {
+                    router_handle.navigate("/sign-in", window, cx);
+                });
+                return;
+            }
+        })
+        .detach();
 
         Self {
             router,

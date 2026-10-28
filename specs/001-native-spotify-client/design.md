@@ -36,13 +36,16 @@ invalidate a running panel's icon-loader cache. No desktop restart or Flatpak re
 
 `NativeSpotify` is a cloneable `Arc<NativeInner>` handle. `NativeInner` owns:
 
-- the librespot `Session`,
-- the `Spirc` controller,
+- a replaceable `SessionConnection` (`Session`, `Spirc`, and an `alive` flag for its polling task),
+- the `Player` and `SoftMixer`, created once and re-pointed at each reconnected session,
 - the shared playback snapshot and its update timestamp,
 - the Tokio runtime used by librespot and the request helpers,
-- the Spotify username.
+- the Spotify username,
+- the reconnect supervisor state (`reconnect_now` wake-up, `signed_out` flag, queued load request).
 
-`NativeSpotify` is the only Spotify type the UI stores.
+`NativeSpotify` is the only Spotify type the UI stores. Its identity never changes, so views and
+`AppState` keep a valid handle across session reconnects (spec 012). While the connection is empty
+the client returns `SpotifyError::Reconnecting` instead of a stale librespot channel error.
 
 ## Authentication flow
 
@@ -68,6 +71,9 @@ invalidate a running panel's icon-loader cache. No desktop restart or Flatpak re
    publish both the client and profile through `AppState`. `MainLayout` observes global state and
    initializes its library/player once the client becomes available. The titlebar displays cached
    profile details immediately and updates them after restoration.
+6. The same connection is reused for the app's lifetime unless librespot invalidates it. A session
+   supervisor refreshes the OAuth token, rebuilds the `Session`/`Spirc`, reuses the `Player` via
+   `set_session`, and resumes interrupted playback without recreating views (spec 012).
 
 The loopback listener and browser interaction stay inside `OAuthClientBuilder`; the app does not
 implement its own HTTP callback server.
