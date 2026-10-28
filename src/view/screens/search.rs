@@ -243,7 +243,7 @@ fn album_card(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl I
 }
 
 /// Open a dedicated artist profile from search without starting playback.
-fn open_artist_profile(uri: &str, name: &str, image: Option<String>, cx: &mut App) {
+pub(crate) fn open_artist_profile(uri: &str, name: &str, image: Option<String>, cx: &mut App) {
     let Some(client) = cx
         .try_global::<AppState>()
         .and_then(AppState::spotify_client)

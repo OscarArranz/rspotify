@@ -11,6 +11,7 @@ use gpui::{
 use crate::lib::spotify::{LikedStatus, NativeSpotify, PlaybackSnapshot, RepeatMode};
 use crate::router::{StackRouter, StackRouterHandle};
 use crate::state::AppState;
+use crate::view::components::artist_credits::artist_credits;
 use crate::view::components::library::{LibrarySidebar, LibrarySize};
 use crate::view::components::liked::{MUTED, like_plus, liked_check};
 use crate::view::components::render_cache::{cached_bar, cached_fill};
@@ -553,6 +554,14 @@ impl Render for PlayerBar {
             volume
         };
         let client = self.client.clone();
+        let credits = track
+            .as_ref()
+            .map(|track| track.artist_credits.clone())
+            .unwrap_or_default();
+        let fallback_artists = track
+            .as_ref()
+            .map(|track| track.artists.clone())
+            .unwrap_or_else(|| "Search for a song to start listening".into());
 
         let prev_client = client.clone();
         let play_client = client.clone();
@@ -710,11 +719,11 @@ impl Render for PlayerBar {
                                     } else {
                                         rgb(0xb3b3b3)
                                     })
-                                    .child(like_error.unwrap_or_else(|| {
-                                        track.as_ref().map(|t| t.artists.clone()).unwrap_or_else(
-                                            || "Search for a song to start listening".into(),
-                                        )
-                                    })),
+                                    .child(if let Some(error) = like_error {
+                                        div().child(error)
+                                    } else {
+                                        div().child(artist_credits(&credits, &fallback_artists))
+                                    }),
                             ),
                     )
                     .children(like_supported.then(|| {

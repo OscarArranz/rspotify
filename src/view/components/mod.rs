@@ -1,3 +1,4 @@
+pub(crate) mod artist_credits;
 pub mod icons;
 pub(crate) mod library;
 pub(crate) mod liked;

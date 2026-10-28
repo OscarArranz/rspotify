@@ -21,6 +21,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use crate::lib::spotify::{
     LikedStatus, NativeSpotify, PlaybackSnapshot, PlaylistDetail, PlaylistPage, PlaylistSource,
 };
+use crate::view::components::artist_credits::artist_credits;
 
 const TRACK_OFFSET: usize = 3;
 const ALBUM_WIDTH: f32 = 160.0;
@@ -1301,10 +1302,8 @@ impl PlaylistScreen {
                             .child(title)
                             .child(
                                 div()
-                                    .truncate()
                                     .text_size(px(13.0))
-                                    .text_color(rgb(0xb3b3b3))
-                                    .child(track.artist.clone()),
+                                    .child(artist_credits(&track.artist_credits, &track.artist)),
                             ),
                     ),
             )
