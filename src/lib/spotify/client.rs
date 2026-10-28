@@ -70,11 +70,18 @@ const OAUTH_SUCCESS_HTML: &str = r#"<!doctype html>
   </body>
 </html>"#;
 
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ArtistCredit {
+    pub name: String,
+    pub uri: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NowPlaying {
     pub uri: String,
     pub title: String,
     pub artists: String,
+    pub artist_credits: Vec<ArtistCredit>,
     pub album: String,
     pub cover_url: Option<String>,
     pub duration_ms: u64,
@@ -742,6 +749,19 @@ fn apply_player_event(inner: &mut PlaybackInner, event: PlayerEvent, now: Instan
                 uri: audio_item.uri.clone(),
                 title: audio_item.name.clone(),
                 artists,
+                artist_credits: match &audio_item.unique_fields {
+                    librespot::metadata::audio::UniqueFields::Track { artists, .. } => artists
+                        .iter()
+                        .filter_map(|artist| {
+                            let uri = artist.id.to_string();
+                            uri.starts_with("spotify:artist:").then(|| ArtistCredit {
+                                name: artist.name.clone(),
+                                uri,
+                            })
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                },
                 album,
                 cover_url: audio_item.covers.first().map(|cover| cover.url.clone()),
                 duration_ms: audio_item.duration_ms as u64,
@@ -935,6 +955,10 @@ fn now_playing_from_remote(
         uri: remote.track_uri.clone(),
         title,
         artists,
+        artist_credits: hydrated
+            .as_ref()
+            .map(|metadata| metadata.artist_credits.clone())
+            .unwrap_or_default(),
         album,
         cover_url,
         duration_ms: hydrated

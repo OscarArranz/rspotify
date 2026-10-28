@@ -19,7 +19,7 @@ mod store;
 pub use artist::{
     ArtistCard, ArtistCardKind, ArtistConcert, ArtistMerch, ArtistProfile, ArtistTrack, ArtistVideo,
 };
-pub use client::{NativeSpotify, PlaybackSnapshot, UserProfile};
+pub use client::{ArtistCredit, NativeSpotify, PlaybackSnapshot, UserProfile};
 pub use error::SpotifyError;
 pub use playlist::{PlaylistDetail, PlaylistPage, PlaylistSource};
 pub use search::{SearchItem, SearchResults};

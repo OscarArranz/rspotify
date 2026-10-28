@@ -10,6 +10,7 @@ use gpui::{
 use crate::lib::spotify::{NativeSpotify, PlaybackSnapshot};
 use crate::router::{StackRouter, StackRouterHandle};
 use crate::state::AppState;
+use crate::view::components::artist_credits::artist_credits;
 use crate::view::components::library::{LibrarySidebar, LibrarySize};
 use crate::view::components::render_cache::{cached_bar, cached_fill};
 use crate::view::components::resizable::{ResizableState, h_resizable, resizable_panel};
@@ -347,6 +348,14 @@ impl Render for PlayerBar {
             volume
         };
         let client = self.client.clone();
+        let credits = track
+            .as_ref()
+            .map(|track| track.artist_credits.clone())
+            .unwrap_or_default();
+        let fallback_artists = track
+            .as_ref()
+            .map(|track| track.artists.clone())
+            .unwrap_or_else(|| "Search for a song to start listening".into());
 
         let prev_client = client.clone();
         let play_client = client.clone();
@@ -493,11 +502,9 @@ impl Render for PlayerBar {
                                     ),
                             )
                             .child(
-                                div().text_xs().text_color(rgb(0xb3b3b3)).child(
-                                    track.as_ref().map(|t| t.artists.clone()).unwrap_or_else(
-                                        || "Search for a song to start listening".into(),
-                                    ),
-                                ),
+                                div()
+                                    .text_xs()
+                                    .child(artist_credits(&credits, &fallback_artists)),
                             ),
                     ),
             )

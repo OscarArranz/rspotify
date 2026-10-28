@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use librespot::core::{Session, SpotifyUri};
+use librespot::core::{Session, SpotifyId, SpotifyUri};
 use librespot::metadata::{Metadata, Playlist};
 use librespot::protocol::{
     context::Context,
@@ -22,6 +22,7 @@ use protobuf::{EnumOrUnknown, Message};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::client::ArtistCredit;
 use super::error::SpotifyError;
 
 const FALLBACK_ACCENT: u32 = 0x5c44c7;
@@ -103,6 +104,8 @@ pub struct PlaylistTrack {
     pub uri: String,
     pub title: String,
     pub artist: String,
+    #[serde(default)]
+    pub artist_credits: Vec<ArtistCredit>,
     pub album: String,
     pub image_url: Option<String>,
     pub duration_ms: u64,
@@ -167,6 +170,21 @@ pub fn read_cached_detail(account: &str, source: &PlaylistSource) -> Option<Play
             fs::read(detail_cache_path_for_identity(account, "liked-songs"))
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        })
+        .map(|mut detail: PlaylistDetail| {
+            for track in &mut detail.tracks {
+                for credit in &mut track.artist_credits {
+                    if let Some(id) = credit.uri.strip_prefix("spotify:artist:") {
+                        if id.len() == 32 {
+                            credit.uri = SpotifyId::from_base16(id)
+                                .and_then(|id| id.to_base62())
+                                .map(|id| format!("spotify:artist:{id}"))
+                                .unwrap_or_default();
+                        }
+                    }
+                }
+            }
+            detail
         })
 }
 
@@ -453,6 +471,7 @@ fn track_from_metadata(
         uri: uri.to_string(),
         title,
         artist,
+        artist_credits: Vec::new(),
         album,
         image_url,
         duration_ms,
@@ -475,6 +494,7 @@ fn track_from_context(track: &ContextTrack, added_at: &HashMap<String, i64>) -> 
 pub(crate) struct HydratedTrack {
     pub(crate) title: String,
     pub(crate) artist: String,
+    pub(crate) artist_credits: Vec<ArtistCredit>,
     pub(crate) album: String,
     pub(crate) image_url: Option<String>,
     pub(crate) duration_ms: u64,
@@ -547,6 +567,7 @@ fn needs_metadata(track: &PlaylistTrack) -> bool {
         && (track.title.is_empty()
             || track.title == "Unknown track"
             || track.artist.is_empty()
+            || (track.uri.starts_with("spotify:track:") && track.artist_credits.is_empty())
             || track.image_url.is_none()
             || track.duration_ms == 0)
 }
@@ -623,6 +644,27 @@ fn hydrated_track_from_message(track: &TrackMessage) -> Option<HydratedTrack> {
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>()
         .join(", ");
+    let artist_credits = track
+        .artist
+        .iter()
+        .filter_map(|artist| {
+            let name = artist.name.as_deref()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let uri = artist
+                .gid
+                .as_deref()
+                .and_then(|gid| SpotifyId::from_raw(gid).ok())
+                .and_then(|id| id.to_base62().ok())
+                .map(|id| format!("spotify:artist:{id}"))
+                .unwrap_or_default();
+            Some(ArtistCredit {
+                name: name.to_string(),
+                uri,
+            })
+        })
+        .collect();
     let album = track
         .album
         .as_ref()
@@ -633,6 +675,7 @@ fn hydrated_track_from_message(track: &TrackMessage) -> Option<HydratedTrack> {
     Some(HydratedTrack {
         title,
         artist,
+        artist_credits,
         album,
         image_url,
         duration_ms: track.duration().max(0) as u64,
@@ -655,6 +698,7 @@ fn hydrated_episode_from_message(episode: &EpisodeMessage) -> Option<HydratedTra
     Some(HydratedTrack {
         title,
         artist: show_name.clone(),
+        artist_credits: Vec::new(),
         album: show_name,
         image_url,
         duration_ms: episode.duration().max(0) as u64,
@@ -695,6 +739,9 @@ fn apply_hydrated(track: &mut PlaylistTrack, metadata: &HydratedTrack) {
     }
     if !metadata.artist.is_empty() {
         track.artist = metadata.artist.clone();
+    }
+    if !metadata.artist_credits.is_empty() {
+        track.artist_credits = metadata.artist_credits.clone();
     }
     if !metadata.album.is_empty() {
         track.album = metadata.album.clone();
@@ -988,6 +1035,10 @@ mod tests {
             name: "Cached playlist".into(),
             tracks: vec![PlaylistTrack {
                 title: "Cached track".into(),
+                artist_credits: vec![ArtistCredit {
+                    name: "Artist".into(),
+                    uri: format!("spotify:artist:{}", "12".repeat(16)),
+                }],
                 ..Default::default()
             }],
             ..Default::default()
@@ -997,6 +1048,14 @@ mod tests {
         let loaded = read_cached_detail("cache-test-account", &source).unwrap();
         assert_eq!(loaded.name, detail.name);
         assert_eq!(loaded.tracks[0].title, "Cached track");
+        let id = SpotifyId::from_raw(&[0x12; 16])
+            .unwrap()
+            .to_base62()
+            .unwrap();
+        assert_eq!(
+            loaded.tracks[0].artist_credits[0].uri,
+            format!("spotify:artist:{id}")
+        );
         fs::write(&path, b"not json").unwrap();
         assert!(read_cached_detail("cache-test-account", &source).is_none());
         let _ = fs::remove_file(path);
@@ -1143,6 +1202,7 @@ mod tests {
 
         let mut artist = Artist::new();
         artist.name = Some("Artist".to_string());
+        artist.gid = Some(vec![0x12; 16]);
 
         let mut message = TrackMessage::new();
         message.name = Some("Title".to_string());
@@ -1154,6 +1214,16 @@ mod tests {
         let hydrated = hydrated_track_from_message(&message).expect("hydrated track");
         assert_eq!(hydrated.title, "Title");
         assert_eq!(hydrated.artist, "Artist");
+        assert_eq!(hydrated.artist_credits.len(), 1);
+        assert_eq!(hydrated.artist_credits[0].name, "Artist");
+        let id = SpotifyId::from_raw(&[0x12; 16])
+            .unwrap()
+            .to_base62()
+            .unwrap();
+        assert_eq!(
+            hydrated.artist_credits[0].uri,
+            format!("spotify:artist:{id}")
+        );
         assert_eq!(hydrated.album, "Album");
         assert_eq!(hydrated.duration_ms, 123_456);
         assert!(hydrated.explicit);
