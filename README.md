@@ -26,6 +26,11 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 - **Spotify-style UI**: custom titlebar, library sidebar, tabbed search results, playlist pages and a now-playing bar, built with GPUI.
 - **Smooth scrolling**: shared easing for wheel and touchpad input in the library, search results,
   horizontal carousels, and virtualized playlists.
+- **Virtualized scrolling**: variable-height Home, Search and Artist pages render visible rows;
+  expanded recommendation/discography grids render visible grid rows, and horizontal shelves over
+  50 cards render visible cards with overscan. Library and playlist virtualization is retained;
+  small fixed-size collections and existing result limits are unchanged. See
+  [`specs/013-virtual-lists/`](specs/013-virtual-lists/).
 
 > **Spotify Premium is required for playback.** Free accounts can sign in and search, but Spotify does not permit playback through this kind of client.
 

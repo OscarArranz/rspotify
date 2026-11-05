@@ -2,14 +2,17 @@
 
 use futures::channel::oneshot;
 use gpui::{
-    App, AppContext, Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle,
-    StatefulInteractiveElement, Styled, Window, div, img, prelude::FluentBuilder, px, rgb, svg,
+    AnyElement, App, AppContext, Context, InteractiveElement, IntoElement, ListAlignment,
+    ListState, ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Window,
+    div, img, list, px, rgb, svg,
 };
 
 use crate::lib::spotify::{NativeSpotify, SearchItem, SearchResults};
 use crate::router::StackRouterHandle;
 use crate::state::AppState;
-use crate::view::components::smooth_scroll::{ScrollAxis, SmoothScrollElement, SmoothScrollState};
+use crate::view::components::smooth_scroll::{
+    SmoothScrollElement, SmoothScrollState, list_scroll_overlay, nested_scroll_region,
+};
 use crate::view::screens::artist::{ArtistScreen, ArtistSource};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +54,16 @@ enum SearchStatus {
     Error(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchRow {
+    Tabs,
+    Status,
+    Heading(&'static str),
+    TopResult,
+    Carousel(SearchTab),
+    Track(usize),
+}
+
 pub(crate) struct SearchScreen {
     query: String,
     tab: SearchTab,
@@ -58,7 +71,8 @@ pub(crate) struct SearchScreen {
     results: SearchResults,
     status: SearchStatus,
     request_generation: u64,
-    vertical_scroll: ScrollHandle,
+    vertical_list: ListState,
+    rows: Vec<SearchRow>,
     featured_scroll: ScrollHandle,
     playlist_scroll: ScrollHandle,
     podcast_scroll: ScrollHandle,
@@ -84,7 +98,8 @@ impl SearchScreen {
             results: SearchResults::default(),
             status: SearchStatus::Idle,
             request_generation: 0,
-            vertical_scroll: ScrollHandle::new(),
+            vertical_list: ListState::new(1, ListAlignment::Top, px(200.0)),
+            rows: Vec::new(),
             featured_scroll: ScrollHandle::new(),
             playlist_scroll: ScrollHandle::new(),
             podcast_scroll: ScrollHandle::new(),
@@ -102,6 +117,7 @@ impl SearchScreen {
     fn select_tab(&mut self, tab: SearchTab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
+            self.reset_list();
             cx.notify();
         }
     }
@@ -115,6 +131,7 @@ impl SearchScreen {
         let generation = self.request_generation;
         self.status = SearchStatus::Loading;
         self.results = SearchResults::default();
+        self.reset_list();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -139,11 +156,18 @@ impl SearchScreen {
                         }
                         Err(error) => this.status = SearchStatus::Error(error.to_string()),
                     }
+                    this.reset_list();
                     cx.notify();
                 });
             }
         })
         .detach();
+    }
+
+    fn reset_list(&mut self) {
+        self.rows = search_rows(self.tab, &self.status, &self.results);
+        self.vertical_scroll_state.cancel();
+        self.vertical_list.reset(self.rows.len());
     }
 }
 
@@ -261,253 +285,221 @@ pub(crate) fn open_artist_profile(uri: &str, name: &str, image: Option<String>, 
     router.push_for_source(screen.into(), uri.to_string(), cx);
 }
 
+fn search_rows(tab: SearchTab, status: &SearchStatus, results: &SearchResults) -> Vec<SearchRow> {
+    let mut rows = vec![SearchRow::Tabs];
+    if !matches!(status, SearchStatus::Loaded) || results.is_empty() {
+        rows.push(SearchRow::Status);
+    }
+    if tab == SearchTab::All && results.top_result.is_some() {
+        rows.extend([SearchRow::Heading("Top result"), SearchRow::TopResult]);
+    }
+    for (category, title, items) in [
+        (SearchTab::Albums, "Featuring", &results.albums),
+        (SearchTab::Songs, "Songs", &results.tracks),
+        (SearchTab::Playlists, "Playlists", &results.playlists),
+        (SearchTab::Podcasts, "Podcasts & Shows", &results.podcasts),
+        (SearchTab::Artists, "Artists", &results.artists),
+    ] {
+        if (tab == SearchTab::All || tab == category) && !items.is_empty() {
+            rows.push(SearchRow::Heading(title));
+            if category == SearchTab::Songs {
+                rows.extend((0..items.len().min(10)).map(SearchRow::Track));
+            } else {
+                rows.push(SearchRow::Carousel(category));
+            }
+        }
+    }
+    rows
+}
+
+impl SearchScreen {
+    fn render_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let content = match self.rows[index] {
+            SearchRow::Tabs => div()
+                .flex()
+                .gap(px(8.0))
+                .children(SearchTab::ALL.into_iter().map(|tab| {
+                    let selected = self.tab == tab;
+                    div()
+                        .id(tab.label())
+                        .px(px(14.0))
+                        .py(px(8.0))
+                        .rounded(px(18.0))
+                        .cursor_pointer()
+                        .bg(rgb(if selected { 0xffffff } else { 0x292929 }))
+                        .text_color(rgb(if selected { 0x000000 } else { 0xffffff }))
+                        .text_sm()
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_tab(tab, cx)))
+                        .child(tab.label())
+                }))
+                .into_any_element(),
+            SearchRow::Status => {
+                let message = match &self.status {
+                    SearchStatus::Idle | SearchStatus::Loading => "Searching…".to_string(),
+                    SearchStatus::Loaded => "No results found.".to_string(),
+                    SearchStatus::Error(error) => format!("Search failed: {error}"),
+                };
+                div()
+                    .py(px(24.0))
+                    .text_color(rgb(0xb3b3b3))
+                    .child(message)
+                    .into_any_element()
+            }
+            SearchRow::Heading(title) => section_heading(title, &self.query).into_any_element(),
+            SearchRow::TopResult => top_result_card(
+                self.results.top_result.as_ref().expect("top result row"),
+                &self.client,
+            ),
+            SearchRow::Track(track) => {
+                track_row(&self.results.tracks[track], track, &self.client).into_any_element()
+            }
+            SearchRow::Carousel(category) => {
+                let (id, items, handle, motion) = match category {
+                    SearchTab::Albums => (
+                        "featured-albums",
+                        &self.results.albums,
+                        &self.featured_scroll,
+                        &self.featured_scroll_state,
+                    ),
+                    SearchTab::Playlists => (
+                        "playlist-results",
+                        &self.results.playlists,
+                        &self.playlist_scroll,
+                        &self.playlist_scroll_state,
+                    ),
+                    SearchTab::Podcasts => (
+                        "podcast-results",
+                        &self.results.podcasts,
+                        &self.podcast_scroll,
+                        &self.podcast_scroll_state,
+                    ),
+                    SearchTab::Artists => (
+                        "artist-results",
+                        &self.results.artists,
+                        &self.artist_scroll,
+                        &self.artist_scroll_state,
+                    ),
+                    _ => unreachable!("only card categories have carousels"),
+                };
+                div()
+                    .id(id)
+                    .relative()
+                    .flex()
+                    .gap(px(8.0))
+                    .overflow_x_scroll()
+                    .smooth_scroll(handle.clone(), motion.clone())
+                    .child(nested_scroll_region(
+                        handle.clone(),
+                        Some(motion.clone()),
+                        self.vertical_scroll_state.clone(),
+                    ))
+                    .children(
+                        items
+                            .iter()
+                            .take(8)
+                            .enumerate()
+                            .map(|(i, item)| album_card(item, i, &self.client)),
+                    )
+                    .into_any_element()
+            }
+        };
+        // Preserve the original page padding and 20px gap between direct children.
+        div()
+            .w_full()
+            .px(px(24.0))
+            .pt(px(if index == 0 { 24.0 } else { 20.0 }))
+            .pb(px(if index + 1 == self.rows.len() {
+                24.0
+            } else {
+                0.0
+            }))
+            .child(content)
+            .into_any_element()
+    }
+}
+
+fn top_result_card(item: &SearchItem, client: &NativeSpotify) -> AnyElement {
+    let top_uri = item.uri.clone();
+    let top_title = item.title.clone();
+    let top_image = item.image.clone();
+    let top_is_song = matches!(item.kind, "Song" | "Episode");
+    let top_is_artist = item.kind == "Artist";
+    let client = client.clone();
+    div()
+        .id("top-result-card")
+        .flex()
+        .items_center()
+        .gap(px(16.0))
+        .p(px(16.0))
+        .rounded(px(8.0))
+        .bg(rgb(0x292929))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(0x333333)))
+        .on_click(move |_, _, cx| {
+            if top_is_artist {
+                open_artist_profile(&top_uri, &top_title, top_image.clone(), cx);
+            } else if top_is_song {
+                let _ = client.play_track(&top_uri);
+            } else {
+                let _ = client.play_context(&top_uri);
+            }
+        })
+        .child(artwork(&item.image, 72.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(item.title.clone())
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0xb3b3b3))
+                        .child(item.subtitle.clone()),
+                ),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .size(px(44.0))
+                .rounded_full()
+                .bg(rgb(0x1ed760))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(rgb(0x000000))
+                .font_weight(gpui::FontWeight::BOLD)
+                .child(
+                    svg()
+                        .path("icons/play.svg")
+                        .size(px(18.0))
+                        .text_color(rgb(0x000000)),
+                ),
+        )
+        .into_any_element()
+}
+
 impl Render for SearchScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let client = self.client.clone();
-        let tabs = SearchTab::ALL.into_iter().map(|tab| {
-            let selected = self.tab == tab;
-            div()
-                .id(tab.label())
-                .px(px(14.0))
-                .py(px(8.0))
-                .rounded(px(18.0))
-                .cursor_pointer()
-                .bg(rgb(if selected { 0xffffff } else { 0x292929 }))
-                .text_color(rgb(if selected { 0x000000 } else { 0xffffff }))
-                .text_sm()
-                .on_click(cx.listener(move |this, _, _, cx| this.select_tab(tab, cx)))
-                .child(tab.label())
-        });
-
-        let status = match &self.status {
-            SearchStatus::Idle | SearchStatus::Loading => Some("Searching…".to_string()),
-            SearchStatus::Loaded if self.results.is_empty() => Some("No results found.".into()),
-            SearchStatus::Loaded => None,
-            SearchStatus::Error(error) => Some(format!("Search failed: {error}")),
-        };
-
-        let show_artists = matches!(self.tab, SearchTab::All | SearchTab::Artists);
-        let show_albums = matches!(self.tab, SearchTab::All | SearchTab::Albums);
-        let show_tracks = matches!(self.tab, SearchTab::All | SearchTab::Songs);
-        let show_playlists = matches!(self.tab, SearchTab::All | SearchTab::Playlists);
-        let show_podcasts = matches!(self.tab, SearchTab::All | SearchTab::Podcasts);
-
         div()
             .id("search-content")
-            .flex()
-            .flex_col()
+            .relative()
             .size_full()
-            .gap(px(20.0))
-            .p(px(24.0))
             .bg(rgb(0x121212))
             .rounded_lg()
-            .overflow_y_scroll()
-            .smooth_scroll(
-                self.vertical_scroll.clone(),
-                ScrollAxis::Vertical,
+            .overflow_hidden()
+            .child(
+                list(
+                    self.vertical_list.clone(),
+                    cx.processor(|this, index, _, cx| this.render_row(index, cx)),
+                )
+                .size_full(),
+            )
+            .child(list_scroll_overlay(
+                self.vertical_list.clone(),
                 self.vertical_scroll_state.clone(),
-            )
-            .child(div().flex().gap(px(8.0)).children(tabs))
-            .children(
-                status.map(|message| div().py(px(24.0)).text_color(rgb(0xb3b3b3)).child(message)),
-            )
-            .when(
-                matches!(self.tab, SearchTab::All) && self.results.top_result.is_some(),
-                |content| {
-                    let item = self.results.top_result.clone().expect("checked above");
-                    let top_uri = item.uri.clone();
-                    let top_title = item.title.clone();
-                    let top_image = item.image.clone();
-                    let top_is_song = matches!(item.kind, "Song" | "Episode");
-                    let top_is_artist = item.kind == "Artist";
-                    let client = client.clone();
-                    content
-                        .child(
-                            div()
-                                .text_xl()
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .child("Top result"),
-                        )
-                        .child(
-                            div()
-                                .id("top-result-card")
-                                .flex()
-                                .items_center()
-                                .gap(px(16.0))
-                                .p(px(16.0))
-                                .rounded(px(8.0))
-                                .bg(rgb(0x292929))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x333333)))
-                                .on_click({
-                                    let client = client.clone();
-                                    move |_, _, cx| {
-                                        if top_is_artist {
-                                            open_artist_profile(
-                                                &top_uri,
-                                                &top_title,
-                                                top_image.clone(),
-                                                cx,
-                                            );
-                                        } else if top_is_song {
-                                            let _ = client.play_track(&top_uri);
-                                        } else {
-                                            let _ = client.play_context(&top_uri);
-                                        }
-                                    }
-                                })
-                                .child(artwork(&item.image, 72.0))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(4.0))
-                                        .child(item.title.clone())
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(0xb3b3b3))
-                                                .child(item.subtitle.clone()),
-                                        ),
-                                )
-                                .child(div().flex_1())
-                                .child(
-                                    div()
-                                        .size(px(44.0))
-                                        .rounded_full()
-                                        .bg(rgb(0x1ed760))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_color(rgb(0x000000))
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .child(
-                                            svg()
-                                                .path("icons/play.svg")
-                                                .size(px(18.0))
-                                                .text_color(rgb(0x000000)),
-                                        ),
-                                ),
-                        )
-                },
-            )
-            .when(show_albums && !self.results.albums.is_empty(), |content| {
-                content
-                    .child(section_heading("Featuring", &self.query))
-                    .child(
-                        div()
-                            .id("featured-albums")
-                            .flex()
-                            .gap(px(8.0))
-                            .overflow_x_scroll()
-                            .smooth_scroll(
-                                self.featured_scroll.clone(),
-                                ScrollAxis::Horizontal,
-                                self.featured_scroll_state.clone(),
-                            )
-                            .children(
-                                self.results
-                                    .albums
-                                    .iter()
-                                    .take(8)
-                                    .enumerate()
-                                    .map(|(index, item)| album_card(item, index, &client)),
-                            ),
-                    )
-            })
-            .when(show_tracks && !self.results.tracks.is_empty(), |content| {
-                content
-                    .child(section_heading("Songs", &self.query))
-                    .children(
-                        self.results
-                            .tracks
-                            .iter()
-                            .take(10)
-                            .enumerate()
-                            .map(|(index, item)| track_row(item, index, &client)),
-                    )
-            })
-            .when(
-                show_playlists && !self.results.playlists.is_empty(),
-                |content| {
-                    content
-                        .child(section_heading("Playlists", &self.query))
-                        .child(
-                            div()
-                                .id("playlist-results")
-                                .flex()
-                                .gap(px(8.0))
-                                .overflow_x_scroll()
-                                .smooth_scroll(
-                                    self.playlist_scroll.clone(),
-                                    ScrollAxis::Horizontal,
-                                    self.playlist_scroll_state.clone(),
-                                )
-                                .children(
-                                    self.results
-                                        .playlists
-                                        .iter()
-                                        .take(8)
-                                        .enumerate()
-                                        .map(|(index, item)| album_card(item, index, &client)),
-                                ),
-                        )
-                },
-            )
-            .when(
-                show_podcasts && !self.results.podcasts.is_empty(),
-                |content| {
-                    content
-                        .child(section_heading("Podcasts & Shows", &self.query))
-                        .child(
-                            div()
-                                .id("podcast-results")
-                                .flex()
-                                .gap(px(8.0))
-                                .overflow_x_scroll()
-                                .smooth_scroll(
-                                    self.podcast_scroll.clone(),
-                                    ScrollAxis::Horizontal,
-                                    self.podcast_scroll_state.clone(),
-                                )
-                                .children(
-                                    self.results
-                                        .podcasts
-                                        .iter()
-                                        .take(8)
-                                        .enumerate()
-                                        .map(|(index, item)| album_card(item, index, &client)),
-                                ),
-                        )
-                },
-            )
-            .when(
-                show_artists && !self.results.artists.is_empty(),
-                |content| {
-                    content
-                        .child(section_heading("Artists", &self.query))
-                        .child(
-                            div()
-                                .id("artist-results")
-                                .flex()
-                                .gap(px(8.0))
-                                .overflow_x_scroll()
-                                .smooth_scroll(
-                                    self.artist_scroll.clone(),
-                                    ScrollAxis::Horizontal,
-                                    self.artist_scroll_state.clone(),
-                                )
-                                .children(
-                                    self.results
-                                        .artists
-                                        .iter()
-                                        .take(8)
-                                        .enumerate()
-                                        .map(|(index, item)| album_card(item, index, &client)),
-                                ),
-                        )
-                },
-            )
+                |_, _| {},
+            ))
     }
 }
 
@@ -525,4 +517,49 @@ fn section_heading(title: &str, query: &str) -> impl IntoElement {
         } else {
             title.to_string()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_tabs_keep_sections_isolated_and_track_cap_when_results_shrink() {
+        let mut results = SearchResults {
+            top_result: Some(SearchItem::default()),
+            tracks: vec![SearchItem::default(); 100],
+            albums: vec![SearchItem::default(); 100],
+            artists: vec![SearchItem::default(); 100],
+            ..Default::default()
+        };
+        let rows = search_rows(SearchTab::Songs, &SearchStatus::Loaded, &results);
+        let mut expected = vec![SearchRow::Tabs, SearchRow::Heading("Songs")];
+        expected.extend((0..10).map(SearchRow::Track));
+        assert_eq!(rows, expected);
+        assert_eq!(
+            search_rows(SearchTab::Albums, &SearchStatus::Loaded, &results),
+            vec![
+                SearchRow::Tabs,
+                SearchRow::Heading("Featuring"),
+                SearchRow::Carousel(SearchTab::Albums)
+            ],
+        );
+        results.tracks.truncate(1);
+        assert_eq!(
+            search_rows(SearchTab::Songs, &SearchStatus::Loaded, &results),
+            vec![
+                SearchRow::Tabs,
+                SearchRow::Heading("Songs"),
+                SearchRow::Track(0)
+            ],
+        );
+        assert_eq!(
+            search_rows(
+                SearchTab::All,
+                &SearchStatus::Loaded,
+                &SearchResults::default()
+            ),
+            vec![SearchRow::Tabs, SearchRow::Status],
+        );
+    }
 }

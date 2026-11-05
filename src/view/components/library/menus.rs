@@ -6,7 +6,7 @@ use gpui_component::{
 };
 
 use super::*;
-use crate::view::components::smooth_scroll::{ScrollAxis, SmoothScrollElement};
+use crate::view::components::smooth_scroll::SmoothScrollElement;
 
 impl LibrarySidebar {
     pub(super) fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -297,11 +297,7 @@ impl LibrarySidebar {
                     .items_center()
                     .gap(px(8.0))
                     .w_full()
-                    .smooth_scroll(
-                        self.chips.clone(),
-                        ScrollAxis::Horizontal,
-                        self.chip_scroll.clone(),
-                    )
+                    .smooth_scroll(self.chips.clone(), self.chip_scroll.clone())
                     .children(chips),
             )
             .when(left, |d| {
