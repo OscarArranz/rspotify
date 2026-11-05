@@ -56,6 +56,9 @@ manual reconnect would need the stored refresh token again.
    state and reconnect backoff. An ignored live smoke test exercises a forced session shutdown and
    is not part of the default suite.
 10. `cargo fmt --check`, `cargo check`, and `cargo test` pass.
+11. A closed Spirc command channel is not a live connection, even before its task finishes or its
+    session becomes invalid. Failed activation/load sends trigger recovery. Queued loads survive
+    failed replay, and publishing a replacement connection cannot race with queuing a play request.
 
 ## Boundaries
 

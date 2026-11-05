@@ -108,12 +108,15 @@ project; it is not a claim that the public Web API exposes the same state.
   command channel is closed; later transport sends fail instead of reconnecting.
 - librespot's own CLI (`librespot/src/main.rs`, 0.8) treats this as a recovery point: it creates a
   new `Session`, calls `player.set_session`, and builds a new `Spirc` around the same player.
-- rspotify follows that pattern. A supervisor watches for an invalid session, a finished Spirc
-  task, or a finished player thread, then refreshes the stored OAuth token through
+- rspotify follows that pattern. A supervisor watches for an invalid session, a closed Spirc command
+  receiver, a finished Spirc task, or a finished player thread, then refreshes the stored OAuth token through
   `https://accounts.spotify.com/api/token`, rebuilds the session/Spirc, and resumes interrupted
   playback. The rotation token returned by that exchange replaces the stored refresh token.
 - Pathfinder and SpClient tokens come from `login5().auth_token()`, which librespot renews on
   demand, so those requests do not need a separate refresh path.
+- The vendored Spirc exposes command-channel health through `is_invalid()`. Failed transport sends
+  invalidate their session; queued loads and replacement publication share a lock, so a play cannot
+  miss the replay window. Failed activation/load replay retains the request for the next rebuild.
 
 ## Client id and redirect
 
