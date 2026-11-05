@@ -17,25 +17,31 @@ pub(crate) fn cached_bar(view: impl Into<AnyView>, height: f32) -> AnyView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::components::smooth_scroll::{
-        ScrollAxis, SmoothScrollElement, SmoothScrollState,
-    };
-    use gpui::InteractiveElement;
+    use crate::view::components::smooth_scroll::{SmoothScrollState, list_scroll_overlay};
     use gpui::{
         AppContext, Context, Entity, IntoElement, ParentElement, Render, TestAppContext, Window,
         div,
     };
     use std::{cell::Cell, rc::Rc};
 
-    struct Region(Rc<Cell<usize>>, gpui::ScrollHandle, SmoothScrollState);
+    struct Region(Rc<Cell<usize>>, gpui::ListState, SmoothScrollState);
     impl Render for Region {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             self.0.set(self.0.get() + 1);
             div()
-                .id("region-scroll")
+                .relative()
                 .size_full()
-                .smooth_scroll(self.1.clone(), ScrollAxis::Vertical, self.2.clone())
-                .child(div().w_full().h(px(2000.0)).flex_shrink_0())
+                .child(
+                    gpui::list(self.1.clone(), |_, _, _| {
+                        div().w_full().h(px(50.0)).into_any_element()
+                    })
+                    .size_full(),
+                )
+                .child(list_scroll_overlay(
+                    self.1.clone(),
+                    self.2.clone(),
+                    |_, _| {},
+                ))
         }
     }
 
@@ -69,14 +75,14 @@ mod tests {
             first: cx.new(|cx| {
                 Region(
                     first_count.clone(),
-                    gpui::ScrollHandle::new(),
+                    gpui::ListState::new(40, gpui::ListAlignment::Top, px(100.0)),
                     SmoothScrollState::new(cx.entity_id()),
                 )
             }),
             second: cx.new(|cx| {
                 Region(
                     second_count.clone(),
-                    gpui::ScrollHandle::new(),
+                    gpui::ListState::new(40, gpui::ListAlignment::Top, px(100.0)),
                     SmoothScrollState::new(cx.entity_id()),
                 )
             }),

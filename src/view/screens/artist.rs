@@ -1,8 +1,8 @@
 //! Spotify-style artist profile screen.
 //!
-//! The page is one variable-height GPUI list so the hero scrolls away while long
-//! discography and shelf sections stay virtualized. All data comes from the native
-//! `queryArtistOverview` payload in `crate::lib::spotify::artist`.
+//! The page is one variable-height GPUI list: popular tracks, concert rows and
+//! responsive discography rows share the hero's scroll surface. Long horizontal
+//! shelves lazily build visible cards from the native `queryArtistOverview` payload.
 
 use std::time::Duration;
 
@@ -11,8 +11,8 @@ use futures::channel::mpsc;
 use gpui::{
     AnyElement, AppContext, Context, InteractiveElement, IntoElement, ListAlignment,
     ListScrollEvent, ListState, ObjectFit, ParentElement, Render, StatefulInteractiveElement,
-    Styled, StyledImage, Window, div, img, linear_color_stop, linear_gradient, list, px, rgb, rgba,
-    svg,
+    Styled, StyledImage, Window, canvas, div, img, linear_color_stop, linear_gradient, list, px,
+    rgb, rgba, svg,
 };
 
 use crate::lib::spotify::{
@@ -20,7 +20,10 @@ use crate::lib::spotify::{
     ArtistVideo, NativeSpotify, PlaybackSnapshot, PlaylistSource,
 };
 use crate::router::StackRouterHandle;
-use crate::view::components::smooth_scroll::{SmoothScrollState, list_scroll_overlay};
+use crate::view::components::smooth_scroll::{
+    SmoothScrollState, list_scroll_overlay, nested_scroll_region,
+};
+use crate::view::components::virtual_list::virtual_horizontal_list;
 use crate::view::screens::playlist::PlaylistScreen;
 
 const HERO_HEIGHT: f32 = 340.0;
@@ -93,6 +96,73 @@ enum ArtistSection {
     AppearsOn,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArtistRow {
+    Section(ArtistSection),
+    Heading(ArtistSection),
+    PopularTrack(usize),
+    DiscographyRow(usize),
+    DiscographyToggle,
+    Concert(usize),
+}
+
+#[derive(Clone, Copy)]
+struct ArtistRows {
+    popular: usize,
+    discography: usize,
+    concerts: usize,
+    columns: usize,
+    discography_toggle: bool,
+}
+
+impl ArtistRows {
+    fn count(self, section: ArtistSection) -> usize {
+        match section {
+            ArtistSection::Popular => 1 + self.popular,
+            ArtistSection::Discography => {
+                1 + self.discography.div_ceil(self.columns) + usize::from(self.discography_toggle)
+            }
+            ArtistSection::Tour => 1 + self.concerts,
+            _ => 1,
+        }
+    }
+
+    fn row(self, section: ArtistSection, index: usize) -> ArtistRow {
+        match (section, index) {
+            (ArtistSection::Popular | ArtistSection::Discography | ArtistSection::Tour, 0) => {
+                ArtistRow::Heading(section)
+            }
+            (ArtistSection::Popular, _) => ArtistRow::PopularTrack(index - 1),
+            (ArtistSection::Discography, _) if index <= self.discography.div_ceil(self.columns) => {
+                ArtistRow::DiscographyRow((index - 1) * self.columns)
+            }
+            (ArtistSection::Discography, _) => ArtistRow::DiscographyToggle,
+            (ArtistSection::Tour, _) => ArtistRow::Concert(index - 1),
+            _ => ArtistRow::Section(section),
+        }
+    }
+
+    fn locate(self, row: ArtistRow) -> (ArtistSection, usize) {
+        let (section, offset) = match row {
+            ArtistRow::Section(section) | ArtistRow::Heading(section) => (section, 0),
+            ArtistRow::PopularTrack(index) => (ArtistSection::Popular, 1 + index),
+            ArtistRow::DiscographyRow(start) => {
+                (ArtistSection::Discography, 1 + start / self.columns)
+            }
+            ArtistRow::DiscographyToggle => (
+                ArtistSection::Discography,
+                self.count(ArtistSection::Discography) - 1,
+            ),
+            ArtistRow::Concert(index) => (ArtistSection::Tour, 1 + index),
+        };
+        (section, offset.min(self.count(section) - 1))
+    }
+}
+
+fn discography_columns(width: f32) -> usize {
+    (((width - 48.0 + 16.0) / (CARD_WIDTH + 16.0)).floor() as usize).max(1)
+}
+
 pub(crate) struct ArtistScreen {
     source: ArtistSource,
     client: NativeSpotify,
@@ -100,16 +170,19 @@ pub(crate) struct ArtistScreen {
     profile: Option<ArtistProfile>,
     sections: Vec<ArtistSection>,
     list_state: ListState,
+    width: f32,
     playback: PlaybackSnapshot,
     popular_expanded: bool,
     discography_filter: DiscographyFilter,
     discography_expanded: bool,
     about_expanded: bool,
+    merch_measurement_index: usize,
     action_error: Option<String>,
     section_error: Option<String>,
     compact_visible: bool,
     request_generation: u64,
     scroll_animation: SmoothScrollState,
+    horizontal_scrolls: [gpui::ScrollHandle; 12],
 }
 
 impl ArtistScreen {
@@ -130,15 +203,18 @@ impl ArtistScreen {
             profile: None,
             sections: Vec::new(),
             list_state,
+            width: 0.0,
             popular_expanded: false,
             discography_filter: DiscographyFilter::Popular,
             discography_expanded: false,
             about_expanded: false,
+            merch_measurement_index: 0,
             action_error: None,
             section_error: None,
             compact_visible: false,
             request_generation: 0,
             scroll_animation: SmoothScrollState::new(cx.entity_id()),
+            horizontal_scrolls: std::array::from_fn(|_| gpui::ScrollHandle::new()),
         };
         this.start_load(cx);
         this.start_playback_poll(cx);
@@ -199,6 +275,12 @@ impl ArtistScreen {
                 .or_else(|| profile.avatar_image_url.clone());
         }
         self.sections = sections_for(&profile);
+        self.merch_measurement_index = profile
+            .merchandise
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, item)| item.price.as_ref().map_or(0, |price| price.len() + 1))
+            .map_or(0, |(index, _)| index);
         if self.discography_filter == DiscographyFilter::Popular
             && profile.discography.popular.is_empty()
         {
@@ -241,12 +323,62 @@ impl ArtistScreen {
         .detach();
     }
 
+    fn rows(&self) -> ArtistRows {
+        let profile = self.profile.as_ref();
+        let popular = profile.map_or(0, |profile| profile.popular_tracks.len());
+        let discography = self.discography_cards().len();
+        ArtistRows {
+            popular: if self.popular_expanded {
+                popular
+            } else {
+                popular.min(POPULAR_COLLAPSED)
+            },
+            discography: if self.discography_expanded {
+                discography
+            } else {
+                discography.min(DISCOGRAPHY_COLLAPSED)
+            },
+            concerts: profile.map_or(0, |profile| profile.concerts.len()),
+            columns: discography_columns(self.width),
+            discography_toggle: discography > DISCOGRAPHY_COLLAPSED || self.discography_expanded,
+        }
+    }
+
+    fn discography_cards(&self) -> &[ArtistCard] {
+        let Some(profile) = self.profile.as_ref() else {
+            return &[];
+        };
+        match self.discography_filter {
+            DiscographyFilter::Popular => &profile.discography.popular,
+            DiscographyFilter::Albums => &profile.discography.albums,
+            DiscographyFilter::Singles => &profile.discography.singles,
+        }
+    }
+
     fn item_count(&self) -> usize {
         if matches!(self.state, LoadState::Loaded) && self.profile.is_some() {
-            2 + self.sections.len()
+            let rows = self.rows();
+            2 + self
+                .sections
+                .iter()
+                .map(|section| rows.count(*section))
+                .sum::<usize>()
         } else {
             2
         }
+    }
+
+    fn row_at(&self, index: usize) -> Option<ArtistRow> {
+        let mut index = index.checked_sub(2)?;
+        let rows = self.rows();
+        for section in &self.sections {
+            let count = rows.count(*section);
+            if index < count {
+                return Some(rows.row(*section, index));
+            }
+            index -= count;
+        }
+        None
     }
 
     fn on_scroll(&mut self, event: &ListScrollEvent, cx: &mut Context<Self>) {
@@ -277,8 +409,21 @@ impl ArtistScreen {
         );
     }
 
-    fn reset_preserving_scroll(&mut self) {
-        let top = self.list_state.logical_scroll_top();
+    fn reset_preserving_scroll(&mut self, anchor: Option<ArtistRow>) {
+        let mut top = self.list_state.logical_scroll_top();
+        if let Some(anchor) = anchor {
+            let rows = self.rows();
+            let (section, offset) = rows.locate(anchor);
+            let mut index = 2;
+            for candidate in &self.sections {
+                if *candidate == section {
+                    top.item_ix = index + offset;
+                    break;
+                }
+                index += rows.count(*candidate);
+            }
+        }
+        top.item_ix = top.item_ix.min(self.item_count().saturating_sub(1));
         self.scroll_animation.cancel();
         self.list_state.reset(self.item_count());
         self.list_state.scroll_to(top);
@@ -311,14 +456,16 @@ impl ArtistScreen {
     }
 
     fn toggle_popular(&mut self, cx: &mut Context<Self>) {
+        let anchor = self.row_at(self.list_state.logical_scroll_top().item_ix);
         self.popular_expanded = !self.popular_expanded;
-        self.reset_preserving_scroll();
+        self.reset_preserving_scroll(anchor);
         cx.notify();
     }
 
     fn toggle_discography(&mut self, cx: &mut Context<Self>) {
+        let anchor = self.row_at(self.list_state.logical_scroll_top().item_ix);
         self.discography_expanded = !self.discography_expanded;
-        self.reset_preserving_scroll();
+        self.reset_preserving_scroll(anchor);
         cx.notify();
     }
 
@@ -326,15 +473,17 @@ impl ArtistScreen {
         if self.discography_filter == filter {
             return;
         }
+        let anchor = self.row_at(self.list_state.logical_scroll_top().item_ix);
         self.discography_filter = filter;
         self.discography_expanded = false;
-        self.reset_preserving_scroll();
+        self.reset_preserving_scroll(anchor);
         cx.notify();
     }
 
     fn toggle_about(&mut self, cx: &mut Context<Self>) {
+        let anchor = self.row_at(self.list_state.logical_scroll_top().item_ix);
         self.about_expanded = !self.about_expanded;
-        self.reset_preserving_scroll();
+        self.reset_preserving_scroll(anchor);
         cx.notify();
     }
 
@@ -496,24 +645,13 @@ impl ArtistScreen {
             .into_any_element()
     }
 
-    fn render_popular(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(profile) = self.profile.as_ref() else {
-            return div().into_any_element();
-        };
-        let tracks = &profile.popular_tracks;
-        let visible = if self.popular_expanded {
-            tracks.len()
-        } else {
-            tracks.len().min(POPULAR_COLLAPSED)
-        };
-        let can_expand = tracks.len() > POPULAR_COLLAPSED;
-        let mut rows = Vec::with_capacity(visible);
-        for (index, track) in tracks.iter().take(visible).enumerate() {
-            rows.push(self.render_track_row(index, track, cx));
-        }
+    fn render_popular_heading(&self, cx: &mut Context<Self>) -> AnyElement {
+        let can_expand = self
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.popular_tracks.len() > POPULAR_COLLAPSED);
         let expanded = self.popular_expanded;
-
-        section(
+        section_heading(
             "Popular",
             can_expand.then(|| {
                 text_button(
@@ -522,7 +660,6 @@ impl ArtistScreen {
                     cx.listener(|this, _, _, cx| this.toggle_popular(cx)),
                 )
             }),
-            div().flex().flex_col().children(rows).into_any_element(),
         )
     }
 
@@ -639,14 +776,11 @@ impl ArtistScreen {
         section("Artist pick", None, body.into_any_element())
     }
 
-    fn render_discography(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(discography) = self
-            .profile
-            .as_ref()
-            .map(|profile| profile.discography.clone())
-        else {
+    fn render_discography_heading(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(profile) = self.profile.as_ref() else {
             return div().into_any_element();
         };
+        let discography = &profile.discography;
         let groups = [
             (DiscographyFilter::Popular, &discography.popular),
             (DiscographyFilter::Albums, &discography.albums),
@@ -677,92 +811,116 @@ impl ArtistScreen {
                 }),
         );
 
-        let items: Vec<ArtistCard> = match self.discography_filter {
-            DiscographyFilter::Popular => discography.popular.clone(),
-            DiscographyFilter::Albums => discography.albums.clone(),
-            DiscographyFilter::Singles => discography.singles.clone(),
-        };
-        let collapsed = items.len() > DISCOGRAPHY_COLLAPSED;
-        let shown = if self.discography_expanded || !collapsed {
-            items.len()
-        } else {
-            DISCOGRAPHY_COLLAPSED
-        };
-        let cards = div().flex().flex_wrap().gap(px(16.0)).children(
-            items
-                .iter()
-                .take(shown)
-                .enumerate()
-                .map(|(index, card)| self.render_card(card, index, false, cx)),
-        );
-        let expanded = self.discography_expanded;
-
-        let body = div()
+        div()
             .flex()
             .flex_col()
-            .gap(px(16.0))
+            .gap(px(12.0))
+            .child(section_heading("Discography", None))
             .child(filters)
-            .child(cards)
-            .children((collapsed || expanded).then(|| {
-                text_button(
-                    "discography-toggle",
-                    if expanded { "Show less" } else { "Show all" },
-                    cx.listener(|this, _, _, cx| this.toggle_discography(cx)),
-                )
-            }));
+            .into_any_element()
+    }
 
-        section("Discography", None, body.into_any_element())
+    fn shelf_cards(&self, section: ArtistSection) -> &[ArtistCard] {
+        let Some(profile) = self.profile.as_ref() else {
+            return &[];
+        };
+        match section {
+            ArtistSection::Featuring => &profile.featuring,
+            ArtistSection::DiscoveredOn => &profile.discovered_on,
+            ArtistSection::RelatedArtists => &profile.related_artists,
+            ArtistSection::AppearsOn => &profile.appears_on,
+            _ => &[],
+        }
     }
 
     fn render_shelf_section(
-        &mut self,
+        &self,
         title: &'static str,
-        cards: Vec<ArtistCard>,
+        section_kind: ArtistSection,
         circular: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if cards.is_empty() {
-            return div().into_any_element();
-        }
-        let shelf = div()
+        let cards = self.shelf_cards(section_kind);
+        let handle = self.horizontal_scrolls[section_kind as usize].clone();
+        let mut shelf = div()
             .id(title)
+            .relative()
             .flex()
             .gap(px(12.0))
             .overflow_x_scroll()
-            .children(
+            .track_scroll(&handle)
+            .child(nested_scroll_region(
+                handle,
+                None,
+                self.scroll_animation.clone(),
+            ));
+        if cards.len() > 50 {
+            shelf = shelf.child(virtual_horizontal_list(
+                cx.entity(),
+                ("artist-shelf", section_kind as usize),
+                cards.len(),
+                CARD_WIDTH,
+                12.0,
+                move |this, index, _, cx| {
+                    this.render_card(&this.shelf_cards(section_kind)[index], index, circular, cx)
+                },
+            ));
+        } else {
+            shelf = shelf.children(
                 cards
                     .iter()
                     .enumerate()
                     .map(|(index, card)| self.render_card(card, index, circular, cx)),
             );
+        }
         section(title, None, shelf.into_any_element())
     }
 
-    fn render_videos(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let videos = self
-            .profile
-            .as_ref()
-            .map(|profile| profile.music_videos.clone())
-            .unwrap_or_default();
-        if videos.is_empty() {
+    fn render_videos(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(profile) = self.profile.as_ref() else {
             return div().into_any_element();
-        }
-        let shelf = div()
+        };
+        let videos = &profile.music_videos;
+        let mut shelf = div()
             .id("artist-videos")
+            .relative()
             .flex()
             .gap(px(12.0))
             .overflow_x_scroll()
-            .children(
+            .track_scroll(&self.horizontal_scrolls[ArtistSection::Videos as usize])
+            .child(nested_scroll_region(
+                self.horizontal_scrolls[ArtistSection::Videos as usize].clone(),
+                None,
+                self.scroll_animation.clone(),
+            ));
+        if videos.len() > 50 {
+            shelf = shelf.child(virtual_horizontal_list(
+                cx.entity(),
+                "artist-video-cards",
+                videos.len(),
+                CARD_WIDTH,
+                12.0,
+                |this, index, _, cx| {
+                    this.render_video_card(
+                        &this.profile.as_ref().unwrap().music_videos[index],
+                        index,
+                        cx,
+                    )
+                },
+            ));
+        } else {
+            shelf = shelf.children(
                 videos
                     .iter()
                     .enumerate()
                     .map(|(index, video)| self.render_video_card(video, index, cx)),
             );
+        }
         section("Music videos", None, shelf.into_any_element())
     }
 
     fn render_video_card(
-        &mut self,
+        &self,
         video: &ArtistVideo,
         index: usize,
         cx: &mut Context<Self>,
@@ -786,26 +944,6 @@ impl ArtistScreen {
         self.render_card_inner(card, index, false, Some("icons/video.svg"), None, cx)
     }
 
-    fn render_tour(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        let concerts = self
-            .profile
-            .as_ref()
-            .map(|profile| profile.concerts.clone())
-            .unwrap_or_default();
-        if concerts.is_empty() {
-            return div().into_any_element();
-        }
-        let rows = concerts
-            .iter()
-            .enumerate()
-            .map(|(index, concert)| render_concert_row(index, concert));
-        section(
-            "On Tour",
-            None,
-            div().flex().flex_col().children(rows).into_any_element(),
-        )
-    }
-
     fn render_about(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(profile) = self.profile.as_ref() else {
             return div().into_any_element();
@@ -814,8 +952,8 @@ impl ArtistScreen {
         let monthly = profile.monthly_listeners;
         let followers = profile.followers;
         let rank = profile.world_rank;
-        let cities = profile.top_cities.clone();
-        let gallery = profile.gallery.clone();
+        let cities = &profile.top_cities;
+        let gallery = &profile.gallery;
         let expanded = self.about_expanded;
 
         let can_expand = biography
@@ -870,9 +1008,16 @@ impl ArtistScreen {
                     .child(
                         div()
                             .id("artist-gallery")
+                            .relative()
                             .flex()
                             .gap(px(8.0))
                             .overflow_x_scroll()
+                            .track_scroll(&self.horizontal_scrolls[ArtistSection::About as usize])
+                            .child(nested_scroll_region(
+                                self.horizontal_scrolls[ArtistSection::About as usize].clone(),
+                                None,
+                                self.scroll_animation.clone(),
+                            ))
                             .children(
                                 gallery
                                     .iter()
@@ -936,31 +1081,54 @@ impl ArtistScreen {
         section("About", None, card.into_any_element())
     }
 
-    fn render_merch(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let items = self
-            .profile
-            .as_ref()
-            .map(|profile| profile.merchandise.clone())
-            .unwrap_or_default();
-        if items.is_empty() {
+    fn render_merch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(profile) = self.profile.as_ref() else {
             return div().into_any_element();
-        }
-        let shelf = div()
+        };
+        let items = &profile.merchandise;
+        let mut shelf = div()
             .id("artist-merch")
+            .relative()
             .flex()
             .gap(px(12.0))
             .overflow_x_scroll()
-            .children(
+            .track_scroll(&self.horizontal_scrolls[ArtistSection::Merch as usize])
+            .child(nested_scroll_region(
+                self.horizontal_scrolls[ArtistSection::Merch as usize].clone(),
+                None,
+                self.scroll_animation.clone(),
+            ));
+        if items.len() > 50 {
+            shelf = shelf.child(
+                virtual_horizontal_list(
+                    cx.entity(),
+                    "artist-merch-cards",
+                    items.len(),
+                    CARD_WIDTH,
+                    12.0,
+                    |this, index, _, cx| {
+                        this.render_merch_card(
+                            &this.profile.as_ref().unwrap().merchandise[index],
+                            index,
+                            cx,
+                        )
+                    },
+                )
+                .with_measurement_index(self.merch_measurement_index),
+            );
+        } else {
+            shelf = shelf.children(
                 items
                     .iter()
                     .enumerate()
                     .map(|(index, item)| self.render_merch_card(item, index, cx)),
             );
+        }
         section("Merch", None, shelf.into_any_element())
     }
 
     fn render_merch_card(
-        &mut self,
+        &self,
         item: &ArtistMerch,
         index: usize,
         cx: &mut Context<Self>,
@@ -985,7 +1153,7 @@ impl ArtistScreen {
     }
 
     fn render_card(
-        &mut self,
+        &self,
         card: &ArtistCard,
         index: usize,
         circular: bool,
@@ -995,7 +1163,7 @@ impl ArtistScreen {
     }
 
     fn render_card_inner(
-        &mut self,
+        &self,
         card: ArtistCard,
         index: usize,
         circular: bool,
@@ -1451,47 +1619,92 @@ impl ArtistScreen {
 
     fn render_section(&mut self, section: ArtistSection, cx: &mut Context<Self>) -> AnyElement {
         match section {
-            ArtistSection::Popular => self.render_popular(cx),
             ArtistSection::Liked => self.render_liked(cx),
             ArtistSection::Pick => self.render_pick(cx),
-            ArtistSection::Discography => self.render_discography(cx),
-            ArtistSection::Featuring => {
-                let cards = self
-                    .profile
-                    .as_ref()
-                    .map(|profile| profile.featuring.clone())
-                    .unwrap_or_default();
-                self.render_shelf_section("Featuring", cards, false, cx)
-            }
+            ArtistSection::Featuring => self.render_shelf_section("Featuring", section, false, cx),
             ArtistSection::Videos => self.render_videos(cx),
-            ArtistSection::Tour => self.render_tour(cx),
             ArtistSection::About => self.render_about(cx),
             ArtistSection::Merch => self.render_merch(cx),
             ArtistSection::DiscoveredOn => {
-                let cards = self
-                    .profile
-                    .as_ref()
-                    .map(|profile| profile.discovered_on.clone())
-                    .unwrap_or_default();
-                self.render_shelf_section("Discovered on", cards, false, cx)
+                self.render_shelf_section("Discovered on", section, false, cx)
             }
             ArtistSection::RelatedArtists => {
-                let cards = self
-                    .profile
-                    .as_ref()
-                    .map(|profile| profile.related_artists.clone())
-                    .unwrap_or_default();
-                self.render_shelf_section("Fans also like", cards, true, cx)
+                self.render_shelf_section("Fans also like", section, true, cx)
             }
-            ArtistSection::AppearsOn => {
-                let cards = self
-                    .profile
-                    .as_ref()
-                    .map(|profile| profile.appears_on.clone())
-                    .unwrap_or_default();
-                self.render_shelf_section("Appears on", cards, false, cx)
+            ArtistSection::AppearsOn => self.render_shelf_section("Appears on", section, false, cx),
+            ArtistSection::Popular | ArtistSection::Discography | ArtistSection::Tour => {
+                unreachable!("row-based sections are flattened before rendering")
             }
         }
+    }
+
+    fn render_row(&mut self, row: ArtistRow, cx: &mut Context<Self>) -> AnyElement {
+        let rows = self.rows();
+        let (body, bottom) = match row {
+            ArtistRow::Section(section) => return self.render_section(section, cx),
+            ArtistRow::Heading(ArtistSection::Popular) => (self.render_popular_heading(cx), 12.0),
+            ArtistRow::Heading(ArtistSection::Discography) => {
+                (self.render_discography_heading(cx), 16.0)
+            }
+            ArtistRow::Heading(ArtistSection::Tour) => (section_heading("On Tour", None), 12.0),
+            ArtistRow::Heading(_) => unreachable!("only flattened sections have headings"),
+            ArtistRow::PopularTrack(index) => {
+                let track = &self.profile.as_ref().unwrap().popular_tracks[index];
+                (
+                    self.render_track_row(index, track, cx),
+                    if index + 1 == rows.popular {
+                        SECTION_GAP
+                    } else {
+                        0.0
+                    },
+                )
+            }
+            ArtistRow::DiscographyRow(start) => {
+                let end = (start + rows.columns).min(rows.discography);
+                let cards = self.discography_cards();
+                (
+                    div()
+                        .flex()
+                        .gap(px(16.0))
+                        .children(
+                            (start..end)
+                                .map(|index| self.render_card(&cards[index], index, false, cx)),
+                        )
+                        .into_any_element(),
+                    if end == rows.discography && !rows.discography_toggle {
+                        SECTION_GAP
+                    } else {
+                        16.0
+                    },
+                )
+            }
+            ArtistRow::DiscographyToggle => (
+                text_button(
+                    "discography-toggle",
+                    if self.discography_expanded {
+                        "Show less"
+                    } else {
+                        "Show all"
+                    },
+                    cx.listener(|this, _, _, cx| this.toggle_discography(cx)),
+                ),
+                SECTION_GAP,
+            ),
+            ArtistRow::Concert(index) => (
+                render_concert_row(index, &self.profile.as_ref().unwrap().concerts[index]),
+                if index + 1 == rows.concerts {
+                    SECTION_GAP
+                } else {
+                    0.0
+                },
+            ),
+        };
+        div()
+            .w_full()
+            .px(px(24.0))
+            .pb(px(bottom))
+            .child(body)
+            .into_any_element()
     }
 
     fn render_item(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -1499,10 +1712,10 @@ impl ArtistScreen {
             0 => self.render_hero(),
             1 if matches!(self.state, LoadState::Loaded) => self.render_action_bar(cx),
             1 => self.render_status(cx),
-            _ => match self.sections.get(index - 2).copied() {
-                Some(section) => {
-                    let mut body = self.render_section(section, cx);
-                    if index == 1 + self.sections.len() {
+            _ => match self.row_at(index) {
+                Some(row) => {
+                    let mut body = self.render_row(row, cx);
+                    if index + 1 == self.item_count() {
                         body = div().pb(px(40.0)).child(body).into_any_element();
                     }
                     body
@@ -1523,6 +1736,29 @@ impl Render for ArtistScreen {
             .bg(rgb(PANEL_BG))
             .rounded_lg()
             .overflow_hidden()
+            .child({
+                let weak = cx.entity().downgrade();
+                canvas(
+                    move |bounds, _, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            let width: f32 = bounds.size.width.into();
+                            if (this.width - width).abs() > 1.0 {
+                                let columns = discography_columns(this.width);
+                                let anchor =
+                                    this.row_at(this.list_state.logical_scroll_top().item_ix);
+                                this.width = width;
+                                if columns != discography_columns(width) {
+                                    this.reset_preserving_scroll(anchor);
+                                }
+                                cx.notify();
+                            }
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full()
+            })
             .child(
                 list(
                     self.list_state.clone(),
@@ -1643,22 +1879,25 @@ fn section(title: &'static str, action: Option<AnyElement>, body: AnyElement) ->
         .flex()
         .flex_col()
         .gap(px(12.0))
+        .child(section_heading(title, action))
+        .child(body)
+        .into_any_element()
+}
+
+fn section_heading(title: &'static str, action: Option<AnyElement>) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(12.0))
         .child(
             div()
-                .flex()
-                .items_center()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(22.0))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(0xffffff))
-                        .child(title),
-                )
-                .children(action),
+                .flex_1()
+                .text_size(px(22.0))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgb(0xffffff))
+                .child(title),
         )
-        .child(body)
+        .children(action)
         .into_any_element()
 }
 
@@ -1933,6 +2172,202 @@ fn format_concert_date(iso: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{ListOffset, TestAppContext, point, size};
+    use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn flattened_rows_retain_headings_toggles_and_every_release() {
+        let rows = ArtistRows {
+            popular: 10_003,
+            discography: 10_007,
+            concerts: 10_001,
+            columns: 5,
+            discography_toggle: true,
+        };
+        assert_eq!(rows.count(ArtistSection::Popular), 10_004);
+        assert_eq!(
+            rows.row(ArtistSection::Popular, 0),
+            ArtistRow::Heading(ArtistSection::Popular)
+        );
+        assert_eq!(
+            rows.row(ArtistSection::Popular, 10_003),
+            ArtistRow::PopularTrack(10_002)
+        );
+        assert_eq!(rows.count(ArtistSection::Tour), 10_002);
+        assert_eq!(
+            rows.row(ArtistSection::Tour, 10_001),
+            ArtistRow::Concert(10_000)
+        );
+        let mut covered = 0;
+        for index in 1..rows.count(ArtistSection::Discography) - 1 {
+            let ArtistRow::DiscographyRow(start) = rows.row(ArtistSection::Discography, index)
+            else {
+                panic!("expected a grid row");
+            };
+            assert_eq!(start, covered);
+            covered = (start + rows.columns).min(rows.discography);
+        }
+        assert_eq!(covered, rows.discography);
+        assert_eq!(
+            rows.row(
+                ArtistSection::Discography,
+                rows.count(ArtistSection::Discography) - 1
+            ),
+            ArtistRow::DiscographyToggle,
+        );
+    }
+
+    #[test]
+    fn grid_resizing_and_shrinking_keep_semantic_anchors_in_range() {
+        assert_eq!(discography_columns(48.0 + CARD_WIDTH), 1);
+        assert_eq!(discography_columns(48.0 + CARD_WIDTH * 3.0 + 32.0), 3);
+        assert_eq!(discography_columns(48.0 + CARD_WIDTH * 3.0 + 31.0), 2);
+        let rows = ArtistRows {
+            popular: POPULAR_COLLAPSED,
+            discography: DISCOGRAPHY_COLLAPSED,
+            concerts: 3,
+            columns: 2,
+            discography_toggle: true,
+        };
+        assert_eq!(rows.count(ArtistSection::Discography), 5);
+        assert_eq!(
+            rows.locate(ArtistRow::DiscographyRow(4)),
+            (ArtistSection::Discography, 3)
+        );
+        assert_eq!(
+            rows.locate(ArtistRow::PopularTrack(100)),
+            (ArtistSection::Popular, POPULAR_COLLAPSED)
+        );
+        let expanded = ArtistRows {
+            discography: 101,
+            columns: 4,
+            ..rows
+        };
+        let resized = ArtistRows {
+            columns: 2,
+            ..expanded
+        };
+        let (_, index) = resized.locate(ArtistRow::DiscographyRow(80));
+        assert_eq!(
+            resized.row(ArtistSection::Discography, index),
+            ArtistRow::DiscographyRow(80)
+        );
+        assert_eq!(expanded.count(ArtistSection::Discography), 28);
+        assert_eq!(resized.count(ArtistSection::Discography), 53);
+    }
+
+    // A native client cannot be constructed offline. Exercise the production row
+    // model and concert renderer directly, without starting ArtistScreen's workers.
+    #[gpui::test]
+    fn large_tour_builds_bounded_rows_at_distant_offsets_and_after_resize(cx: &mut TestAppContext) {
+        struct TourFixture {
+            list: ListState,
+            concerts: Rc<Vec<ArtistConcert>>,
+            rendered: Rc<RefCell<Vec<usize>>>,
+        }
+        impl Render for TourFixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.rendered.borrow_mut().clear();
+                let concerts = self.concerts.clone();
+                let rendered = self.rendered.clone();
+                let rows = ArtistRows {
+                    popular: 0,
+                    discography: 0,
+                    concerts: concerts.len(),
+                    columns: 1,
+                    discography_toggle: false,
+                };
+                list(self.list.clone(), move |index, _, _| {
+                    match rows.row(ArtistSection::Tour, index) {
+                        ArtistRow::Heading(_) => section_heading("On Tour", None),
+                        ArtistRow::Concert(index) => {
+                            rendered.borrow_mut().push(index);
+                            div()
+                                .w_full()
+                                .px(px(24.0))
+                                .pb(px(if index + 1 == rows.concerts {
+                                    SECTION_GAP
+                                } else {
+                                    0.0
+                                }))
+                                .child(render_concert_row(index, &concerts[index]))
+                                .into_any_element()
+                        }
+                        _ => unreachable!(),
+                    }
+                })
+                .size_full()
+            }
+        }
+        let concerts = Rc::new(
+            (0..10_000)
+                .map(|index| ArtistConcert {
+                    city: format!("City {index}"),
+                    venue: format!("Venue {index}"),
+                    date_label: "2026-06-03T20:00:00Z".into(),
+                    ..ArtistConcert::default()
+                })
+                .collect::<Vec<_>>(),
+        );
+        let state = ListState::new(concerts.len() + 1, ListAlignment::Top, px(1600.0));
+        let rendered = Rc::new(RefCell::new(Vec::new()));
+        let (view, cx) = cx.add_window_view(|_, _| TourFixture {
+            list: state.clone(),
+            concerts,
+            rendered: rendered.clone(),
+        });
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(900.0), px(600.0)),
+            |_, _| view.clone(),
+        );
+        assert!(rendered.borrow().len() < 128);
+        assert!(!rendered.borrow().contains(&8_000));
+        rendered.borrow_mut().clear();
+        state.scroll_to(ListOffset {
+            item_ix: 8_001,
+            offset_in_item: px(0.0),
+        });
+        view.update(cx, |_, cx| cx.notify());
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(900.0), px(600.0)),
+            |_, _| view.clone(),
+        );
+        assert!(rendered.borrow().contains(&8_000));
+        assert!(rendered.borrow().len() < 128);
+        rendered.borrow_mut().clear();
+        state.scroll_to(ListOffset {
+            item_ix: 10_000,
+            offset_in_item: px(0.0),
+        });
+        view.update(cx, |_, cx| cx.notify());
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(420.0), px(480.0)),
+            |_, _| view.clone(),
+        );
+        assert!(rendered.borrow().contains(&9_999));
+        assert!(rendered.borrow().len() < 128);
+        assert!(state.bounds_for_item(10_000).is_some());
+        rendered.borrow_mut().clear();
+        view.update(cx, |this, cx| {
+            this.concerts = Rc::new(this.concerts.iter().take(40).cloned().collect());
+            this.list.reset(this.concerts.len() + 1);
+            this.list.scroll_to(ListOffset {
+                item_ix: 40,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+        });
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(420.0), px(480.0)),
+            |_, _| view.clone(),
+        );
+        assert!(rendered.borrow().contains(&39));
+        assert!(rendered.borrow().iter().all(|index| *index < 40));
+    }
 
     #[test]
     fn formats_listener_counts_with_separators() {

@@ -5,16 +5,10 @@ const SCROLL_RESPONSE_SECONDS: f32 = 0.018;
 const SCROLL_SETTLE_EPSILON_PX: f32 = 0.35;
 
 use gpui::{
-    App, DispatchPhase, Div, EntityId, HitboxBehavior, InteractiveElement, IntoElement, ListState,
-    Pixels, ScrollHandle, ScrollWheelEvent, Stateful, StatefulInteractiveElement, Styled, Window,
-    canvas, point, px,
+    App, Bounds, DispatchPhase, Div, EntityId, HitboxBehavior, InteractiveElement, IntoElement,
+    ListState, Pixels, ScrollHandle, ScrollWheelEvent, Stateful, StatefulInteractiveElement,
+    Styled, Window, canvas, point, px,
 };
-
-#[derive(Clone, Copy)]
-pub(crate) enum ScrollAxis {
-    Vertical,
-    Horizontal,
-}
 
 #[derive(Default)]
 struct Motion {
@@ -24,6 +18,8 @@ struct Motion {
     last_frame: Option<Instant>,
     generation: u64,
     frame_intervals_ms: Option<Vec<f32>>,
+    horizontal_regions: Vec<HorizontalRegion>,
+    pending_horizontal_regions: Vec<HorizontalRegion>,
 }
 
 impl Motion {
@@ -63,6 +59,12 @@ impl Motion {
     }
 }
 
+struct HorizontalRegion {
+    bounds: Bounds<Pixels>,
+    handle: ScrollHandle,
+    motion: Option<SmoothScrollState>,
+}
+
 #[derive(Clone)]
 pub(crate) struct SmoothScrollState(Rc<RefCell<Motion>>, Option<EntityId>);
 
@@ -96,19 +98,14 @@ impl SmoothScrollState {
 
 #[derive(Clone)]
 enum Surface {
-    Div(ScrollHandle, ScrollAxis),
+    Div(ScrollHandle),
     List(ListState),
 }
 
 impl Surface {
     fn position_and_max(&self) -> (f32, f32) {
         match self {
-            Self::Div(handle, ScrollAxis::Vertical) => {
-                (handle.offset().y.into(), handle.max_offset().height.into())
-            }
-            Self::Div(handle, ScrollAxis::Horizontal) => {
-                (handle.offset().x.into(), handle.max_offset().width.into())
-            }
+            Self::Div(handle) => (handle.offset().x.into(), handle.max_offset().width.into()),
             Self::List(list) => (
                 list.scroll_px_offset_for_scrollbar().y.into(),
                 list.max_offset_for_scrollbar().height.into(),
@@ -118,12 +115,9 @@ impl Surface {
 
     fn set_position(&self, position: f32) {
         match self {
-            Self::Div(handle, axis) => {
+            Self::Div(handle) => {
                 let mut offset = handle.offset();
-                match axis {
-                    ScrollAxis::Vertical => offset.y = px(position),
-                    ScrollAxis::Horizontal => offset.x = px(position),
-                }
+                offset.x = px(position);
                 handle.set_offset(offset);
             }
             Self::List(list) => list.set_offset_from_scrollbar(point(px(0.0), px(position))),
@@ -140,13 +134,13 @@ fn handle_wheel(
     surface: &Surface,
     state: &SmoothScrollState,
     on_scroll: &OnScroll,
-) {
-    if matches!(surface, Surface::Div(_, ScrollAxis::Horizontal)) && !event.modifiers.shift {
-        return;
+) -> bool {
+    if matches!(surface, Surface::Div(_)) && !event.modifiers.shift {
+        return false;
     }
     let delta = event.delta.pixel_delta(px(20.0));
     let delta = match surface {
-        Surface::Div(_, ScrollAxis::Horizontal) => {
+        Surface::Div(_) => {
             if delta.x != Pixels::ZERO {
                 delta.x
             } else {
@@ -156,16 +150,16 @@ fn handle_wheel(
         _ => delta.y,
     };
     if delta == Pixels::ZERO {
-        return;
+        return false;
     }
     let (current, max) = surface.position_and_max();
     let mut motion = state.0.borrow_mut();
     if !motion.enqueue(current, delta.into(), max) {
-        return;
+        return false;
     }
     cx.stop_propagation();
     if motion.running {
-        return;
+        return true;
     }
     motion.running = true;
     motion.generation = motion.generation.wrapping_add(1);
@@ -184,6 +178,7 @@ fn handle_wheel(
         generation,
     );
     state.invalidate(window, cx);
+    true
 }
 
 fn schedule_frame(
@@ -240,22 +235,13 @@ fn schedule_frame(
     });
 }
 
+/// Horizontal div scrolling; vertical surfaces use the virtual-list overlay.
 pub(crate) trait SmoothScrollElement {
-    fn smooth_scroll(
-        self,
-        handle: ScrollHandle,
-        axis: ScrollAxis,
-        state: SmoothScrollState,
-    ) -> Self;
+    fn smooth_scroll(self, handle: ScrollHandle, state: SmoothScrollState) -> Self;
 }
 
 impl SmoothScrollElement for Stateful<Div> {
-    fn smooth_scroll(
-        self,
-        handle: ScrollHandle,
-        axis: ScrollAxis,
-        state: SmoothScrollState,
-    ) -> Self {
+    fn smooth_scroll(self, handle: ScrollHandle, state: SmoothScrollState) -> Self {
         // Hidden overflow still supports tracked offsets, but GPUI's default wheel listener
         // no longer moves them. Nested children receive bubble events before this handler.
         let on_scroll: OnScroll = Rc::new(|_, _| {});
@@ -266,12 +252,83 @@ impl SmoothScrollElement for Stateful<Div> {
                     event,
                     window,
                     cx,
-                    &Surface::Div(handle.clone(), axis),
+                    &Surface::Div(handle.clone()),
                     &state,
                     &on_scroll,
                 );
             })
     }
+}
+
+/// Register only painted carousel bounds, so offscreen cached handles cannot steal input.
+/// `None` retains native (uneased) horizontal movement for Artist carousels.
+pub(crate) fn nested_scroll_region(
+    handle: ScrollHandle,
+    motion: Option<SmoothScrollState>,
+    parent: SmoothScrollState,
+) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            parent
+                .0
+                .borrow_mut()
+                .pending_horizontal_regions
+                .push(HorizontalRegion {
+                    bounds: bounds.intersect(&window.content_mask().bounds),
+                    handle: handle.clone(),
+                    motion: motion.clone(),
+                });
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+fn handle_nested_wheel(
+    event: &ScrollWheelEvent,
+    window: &mut Window,
+    cx: &mut App,
+    parent: &SmoothScrollState,
+    on_scroll: &OnScroll,
+) -> bool {
+    for region in parent.0.borrow().horizontal_regions.iter().rev() {
+        if !region.bounds.contains(&event.position) {
+            continue;
+        }
+        if let Some(motion) = &region.motion {
+            if handle_wheel(
+                event,
+                window,
+                cx,
+                &Surface::Div(region.handle.clone()),
+                motion,
+                on_scroll,
+            ) {
+                return true;
+            }
+        } else {
+            let delta = event.delta.pixel_delta(px(20.0));
+            let delta = if delta.x != Pixels::ZERO {
+                delta.x
+            } else if event.modifiers.shift {
+                delta.y
+            } else {
+                Pixels::ZERO
+            };
+            let offset = region.handle.offset();
+            let next = (offset.x + delta).clamp(-region.handle.max_offset().width, px(0.0));
+            if next != offset.x {
+                region.handle.set_offset(point(next, offset.y));
+                parent.invalidate(window, cx);
+                cx.stop_propagation();
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Place after the list in a relatively positioned parent. This registers only a scroll
@@ -281,15 +338,31 @@ pub(crate) fn list_scroll_overlay(
     state: SmoothScrollState,
     on_scroll: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let layout_state = state.clone();
     let on_scroll: OnScroll = Rc::new(on_scroll);
     canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |bounds, window, _| {
+            let mut motion = layout_state.0.borrow_mut();
+            let Motion {
+                horizontal_regions,
+                pending_horizontal_regions,
+                ..
+            } = &mut *motion;
+            std::mem::swap(horizontal_regions, pending_horizontal_regions);
+            pending_horizontal_regions.clear();
+            window.insert_hitbox(bounds, HitboxBehavior::Normal)
+        },
         move |_, hitbox, window, _| {
             let surface = Surface::List(list.clone());
             let state = state.clone();
             let on_scroll = on_scroll.clone();
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
+                    // The list's native listener runs before its children. Route painted
+                    // carousels first, then ease vertical input without a native jump.
+                    if handle_nested_wheel(event, window, cx, &state, &on_scroll) {
+                        return;
+                    }
                     handle_wheel(event, window, cx, &surface, &state, &on_scroll);
                     // At the list boundary suppress its native handler as well: otherwise
                     // it could jump independently of our animation.
@@ -314,77 +387,68 @@ mod tests {
     struct TestSurface {
         handle: ScrollHandle,
         state: SmoothScrollState,
-        axis: ScrollAxis,
     }
 
     impl Render for TestSurface {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let (width, height) = match self.axis {
-                ScrollAxis::Vertical => (100.0, 1000.0),
-                ScrollAxis::Horizontal => (1000.0, 100.0),
-            };
             div()
                 .id("scroll-test")
                 .size_full()
-                .smooth_scroll(self.handle.clone(), self.axis, self.state.clone())
-                .child(div().w(px(width)).h(px(height)).flex_shrink_0())
+                .smooth_scroll(self.handle.clone(), self.state.clone())
+                .child(div().w(px(1000.0)).h(px(100.0)).flex_shrink_0())
         }
     }
 
     #[gpui::test]
     fn pixel_and_line_events_are_intercepted_without_a_native_jump(cx: &mut TestAppContext) {
-        for axis in [ScrollAxis::Vertical, ScrollAxis::Horizontal] {
-            let cx = cx.add_empty_window();
-            let handle = ScrollHandle::new();
-            let state = SmoothScrollState::default();
-            cx.draw(
-                point(px(0.0), px(0.0)),
-                size(px(100.0), px(100.0)),
-                |_, cx| {
-                    cx.new(|_| TestSurface {
-                        handle: handle.clone(),
-                        state: state.clone(),
-                        axis,
-                    })
-                },
-            );
-            cx.simulate_event(ScrollWheelEvent {
-                position: point(px(10.0), px(10.0)),
-                delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
-                modifiers: gpui::Modifiers {
-                    shift: matches!(axis, ScrollAxis::Horizontal),
-                    ..Default::default()
-                },
+        let cx = cx.add_empty_window();
+        let handle = ScrollHandle::new();
+        let state = SmoothScrollState::default();
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(100.0), px(100.0)),
+            |_, cx| {
+                cx.new(|_| TestSurface {
+                    handle: handle.clone(),
+                    state: state.clone(),
+                })
+            },
+        );
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(10.0), px(10.0)),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
+            modifiers: gpui::Modifiers {
+                shift: true,
                 ..Default::default()
-            });
-            assert_eq!(handle.offset(), point(px(0.0), px(0.0)));
-            assert_eq!(state.0.borrow().target, -60.0);
-            assert!(state.0.borrow().running);
-            // draw() installs a temporary test element, not the empty window's root.
-            // Reinstall it after simulate_event's refresh before dispatching again.
-            cx.draw(
-                point(px(0.0), px(0.0)),
-                size(px(100.0), px(100.0)),
-                |_, cx| {
-                    cx.new(|_| TestSurface {
-                        handle: handle.clone(),
-                        state: state.clone(),
-                        axis,
-                    })
-                },
-            );
-            cx.simulate_event(ScrollWheelEvent {
-                position: point(px(10.0), px(10.0)),
-                delta: gpui::ScrollDelta::Lines(point(0.0, -3.0)),
-                modifiers: gpui::Modifiers {
-                    shift: matches!(axis, ScrollAxis::Horizontal),
-                    ..Default::default()
-                },
+            },
+            ..Default::default()
+        });
+        assert_eq!(handle.offset(), point(px(0.0), px(0.0)));
+        assert_eq!(state.0.borrow().target, -60.0);
+        assert!(state.0.borrow().running);
+        // draw() installs a temporary test element, not the empty window's root.
+        // Reinstall it after simulate_event's refresh before dispatching again.
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(100.0), px(100.0)),
+            |_, cx| {
+                cx.new(|_| TestSurface {
+                    handle: handle.clone(),
+                    state: state.clone(),
+                })
+            },
+        );
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(10.0), px(10.0)),
+            delta: gpui::ScrollDelta::Lines(point(0.0, -3.0)),
+            modifiers: gpui::Modifiers {
+                shift: true,
                 ..Default::default()
-            });
-            assert_eq!(state.0.borrow().target, -120.0);
-            state.cancel();
-        }
+            },
+            ..Default::default()
+        });
+        assert_eq!(state.0.borrow().target, -120.0);
+        state.cancel();
     }
 
     #[gpui::test]
@@ -473,78 +537,120 @@ mod tests {
     #[gpui::test]
     fn nested_carousel_consumes_input_then_chains_at_boundary(cx: &mut TestAppContext) {
         struct Nested {
-            outer: ScrollHandle,
+            outer: ListState,
             inner: ScrollHandle,
             outer_motion: SmoothScrollState,
             inner_motion: SmoothScrollState,
+            smooth: bool,
         }
         impl Render for Nested {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let inner = self.inner.clone();
+                let motion = self.inner_motion.clone();
+                let parent_motion = self.outer_motion.clone();
+                let smooth = self.smooth;
                 div()
-                    .id("outer")
+                    .relative()
                     .size_full()
-                    .flex()
-                    .flex_col()
-                    .smooth_scroll(
-                        self.outer.clone(),
-                        ScrollAxis::Vertical,
-                        self.outer_motion.clone(),
-                    )
                     .child(
-                        div()
-                            .id("inner")
-                            .w_full()
-                            .h(px(50.0))
-                            .flex_shrink_0()
-                            .smooth_scroll(
-                                self.inner.clone(),
-                                ScrollAxis::Horizontal,
-                                self.inner_motion.clone(),
-                            )
-                            .child(div().w(px(1000.0)).h(px(50.0)).flex_shrink_0()),
+                        list(self.outer.clone(), move |index, _, _| {
+                            if index == 0 {
+                                let row = div()
+                                    .id("inner")
+                                    .relative()
+                                    .w_full()
+                                    .h(px(50.0))
+                                    .child(div().w(px(1000.0)).h(px(50.0)).flex_shrink_0())
+                                    .child(nested_scroll_region(
+                                        inner.clone(),
+                                        smooth.then(|| motion.clone()),
+                                        parent_motion.clone(),
+                                    ));
+                                if smooth {
+                                    row.smooth_scroll(inner.clone(), motion.clone())
+                                        .into_any_element()
+                                } else {
+                                    row.overflow_x_scroll()
+                                        .track_scroll(&inner)
+                                        .into_any_element()
+                                }
+                            } else {
+                                div().w_full().h(px(50.0)).into_any_element()
+                            }
+                        })
+                        .size_full(),
                     )
-                    .child(div().w_full().h(px(1000.0)).flex_shrink_0())
+                    .child(list_scroll_overlay(
+                        self.outer.clone(),
+                        self.outer_motion.clone(),
+                        |_, _| {},
+                    ))
             }
         }
-        let cx = cx.add_empty_window();
-        let outer = ScrollHandle::new();
-        let inner = ScrollHandle::new();
-        let outer_motion = SmoothScrollState::default();
-        let inner_motion = SmoothScrollState::default();
-        let view = cx.new(|_| Nested {
-            outer: outer.clone(),
-            inner: inner.clone(),
-            outer_motion: outer_motion.clone(),
-            inner_motion: inner_motion.clone(),
-        });
-        cx.draw(
-            point(px(0.0), px(0.0)),
-            size(px(100.0), px(100.0)),
-            |_, _| view.clone(),
-        );
-        let wheel = ScrollWheelEvent {
-            position: point(px(10.0), px(10.0)),
-            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
-            modifiers: gpui::Modifiers {
-                shift: true,
+        for smooth in [true, false] {
+            let cx = cx.add_empty_window();
+            let outer = ListState::new(21, gpui::ListAlignment::Top, px(200.0));
+            let inner = ScrollHandle::new();
+            let outer_motion = SmoothScrollState::default();
+            let inner_motion = SmoothScrollState::default();
+            let view = cx.new(|_| Nested {
+                outer: outer.clone(),
+                inner: inner.clone(),
+                outer_motion: outer_motion.clone(),
+                inner_motion: inner_motion.clone(),
+                smooth,
+            });
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(100.0), px(100.0)),
+                |_, _| view.clone(),
+            );
+            let wheel = ScrollWheelEvent {
+                position: point(px(10.0), px(10.0)),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
+                modifiers: gpui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        };
-        cx.simulate_event(wheel.clone());
-        assert_eq!(inner_motion.0.borrow().target, -60.0);
-        assert!(!outer_motion.0.borrow().running);
-        inner_motion.cancel();
-        inner.set_offset(point(-inner.max_offset().width, px(0.0)));
-        cx.draw(
-            point(px(0.0), px(0.0)),
-            size(px(100.0), px(100.0)),
-            |_, _| view.clone(),
-        );
-        cx.simulate_event(wheel);
-        assert_eq!(outer_motion.0.borrow().target, -60.0);
-        assert!(!inner_motion.0.borrow().running);
-        outer_motion.cancel();
+            };
+            cx.simulate_event(wheel.clone());
+            if smooth {
+                assert_eq!(inner_motion.0.borrow().target, -60.0);
+            } else {
+                assert_eq!(inner.offset().x, px(-60.0));
+            }
+            assert!(!outer_motion.0.borrow().running);
+            inner_motion.cancel();
+            inner.set_offset(point(-inner.max_offset().width, px(0.0)));
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(100.0), px(100.0)),
+                |_, _| view.clone(),
+            );
+            cx.simulate_event(wheel.clone());
+            assert_eq!(outer_motion.0.borrow().target, -60.0);
+            assert!(!inner_motion.0.borrow().running);
+            outer_motion.cancel();
+            // Once the carousel scrolls out of view, its cached bounds must not steal input.
+            outer.scroll_to(gpui::ListOffset {
+                item_ix: 10,
+                offset_in_item: px(0.0),
+            });
+            inner.set_offset(point(px(0.0), px(0.0)));
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(100.0), px(100.0)),
+                |_, _| view.clone(),
+            );
+            let vertical_before = outer.scroll_px_offset_for_scrollbar().y;
+            cx.simulate_event(wheel);
+            assert_eq!(inner.offset().x, px(0.0));
+            assert!(!inner_motion.0.borrow().running);
+            assert!(outer_motion.0.borrow().running);
+            assert_eq!(outer.scroll_px_offset_for_scrollbar().y, vertical_before);
+            outer_motion.cancel();
+        }
     }
 
     #[test]

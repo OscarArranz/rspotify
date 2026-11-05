@@ -2,20 +2,18 @@
 
 ## Module boundaries
 
-- `src/view/components/smooth_scroll.rs` owns the shared wheel-delta easing behavior for GPUI
-  scrollable `div` elements.
+- `src/view/components/smooth_scroll.rs` owns wheel-delta easing for horizontal scrollable divs
+  and vertical virtual lists, including routing input to nested horizontal carousels.
 - `src/view/components/mod.rs` exports the helper to view modules.
-- `src/view/main_layout.rs` applies it to the library playlist list.
-- `src/view/screens/search.rs` applies it to the search page and horizontal result carousels.
-- `src/view/screens/playlist.rs` retains the GPUI virtualized `ListState` and applies compatible
-  smoothing without replacing virtualization or pagination.
+- `src/view/components/library/` applies it to the virtual library list and category chips.
+- Home, Search and Artist use vertical virtual lists (spec 013); Home and Search retain eased
+  horizontal carousels, while Artist retains native horizontal movement.
+- Playlist retains its GPUI `ListState`, compatible easing and pagination.
 
 ## Behavior
 
-GPUI scrollable divs currently apply incoming wheel deltas directly to their offsets. The shared
-helper owns the scroll offset and eases both pixel and line deltas: Linux wheel events can be
-pixel-based too. Scrollable divs use clipped overflow plus a tracked handle, disabling GPUI's
-immediate wheel movement; the helper consumes input only when the requested axis can move.
+Horizontal scrollable divs use clipped overflow plus a tracked handle, disabling GPUI's immediate
+wheel movement; the helper consumes input only when the requested axis can move.
 Horizontal divs additionally require the Shift modifier; without it they leave the event
 unconsumed so the vertical parent can handle it.
 Repeated input accumulates toward a clamped target; reversing direction discards stale momentum.
@@ -25,10 +23,11 @@ foreground thread. Horizontal/vertical direction and
 existing parent/child scroll ownership are preserved; the helper must not consume gestures that the
 child cannot handle.
 
-The playlist remains one variable-height virtualized GPUI list. Smoothing must preserve the
-pagination threshold and existing programmatic top resets. A scroll-only canvas above the list
-handles bubble-phase input before the list's native wheel listener; clicks remain unaffected.
-Animation updates notify pagination from the actual visible rows, not an intermediate wheel jump.
+Vertical surfaces use variable-height virtualized GPUI lists. Smoothing preserves pagination and
+programmatic resets. A scroll-only canvas above each list handles bubble-phase input before the
+list's native wheel listener; clicks remain unaffected. Painted horizontal carousels register their
+clipped bounds during prepaint. The overlay routes input to those carousels first and chains at their
+edges, without letting stale bounds from offscreen rows intercept input.
 
 ## State ownership
 
