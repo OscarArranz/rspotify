@@ -537,6 +537,7 @@ impl NativeSpotify {
     ) -> Result<T, SpotifyError> {
         let connection = self.connection_now()?;
         command(&connection.spirc).map_err(|_| {
+            connection.session.shutdown();
             self.inner.reconnect_now.notify_one();
             SpotifyError::Reconnecting
         })
@@ -544,17 +545,24 @@ impl NativeSpotify {
 
     /// Queues a load when the session is down and replays it after the next reconnect.
     fn send_load(&self, request: LoadRequest) -> Result<(), SpotifyError> {
+        // Serialize queueing with replay/publication of a replacement connection.
+        let mut pending = self.inner.pending_load.lock().unwrap();
         let connection = match self.connection_now() {
             Ok(connection) => connection,
             Err(error) => {
-                *self.inner.pending_load.lock().unwrap() = Some(request);
+                *pending = Some(request);
                 return Err(error);
             }
         };
-        let _ = connection.spirc.activate();
-        if connection.spirc.load(request.clone()).is_err() {
+        if connection
+            .spirc
+            .activate()
+            .and_then(|()| connection.spirc.load(request.clone()))
+            .is_err()
+        {
+            *pending = Some(request);
+            connection.session.shutdown();
             self.inner.reconnect_now.notify_one();
-            *self.inner.pending_load.lock().unwrap() = Some(request);
             return Err(SpotifyError::Reconnecting);
         }
         Ok(())
@@ -1034,7 +1042,7 @@ impl NativeInner {
             .read()
             .unwrap()
             .as_ref()
-            .filter(|connection| !connection.session.is_invalid())
+            .filter(|connection| !connection.session.is_invalid() && !connection.spirc.is_invalid())
             .cloned()
     }
 
@@ -1047,7 +1055,7 @@ impl NativeInner {
         }
         match self.connection.read().unwrap().as_ref() {
             None => true,
-            Some(connection) => connection.session.is_invalid(),
+            Some(connection) => connection.session.is_invalid() || connection.spirc.is_invalid(),
         }
     }
 
@@ -1065,15 +1073,26 @@ impl NativeInner {
 
     /// Applies a user load queued during the reconnect, or resumes interrupted playback.
     fn resume_playback(&self, connection: &SessionConnection, resume: Option<ResumeTarget>) {
-        let pending = self.pending_load.lock().unwrap().take();
-        let request = pending.or_else(|| resume.map(resume_load_request));
-        let Some(request) = request else {
-            return;
-        };
-        let _ = connection.spirc.activate();
-        if connection.spirc.load(request).is_err() {
-            self.reconnect_now.notify_one();
+        let mut pending = self.pending_load.lock().unwrap();
+        let request = pending.take().or_else(|| resume.map(resume_load_request));
+        if let Some(request) = request {
+            if connection
+                .spirc
+                .activate()
+                .and_then(|()| connection.spirc.load(request.clone()))
+                .is_err()
+            {
+                *pending = Some(request);
+                // This connection is never published, so the next detach cannot stop its
+                // connect-state poller; do it here.
+                connection.alive.store(false, Ordering::Relaxed);
+                connection.session.shutdown();
+                self.reconnect_now.notify_one();
+                return;
+            }
         }
+        // A concurrent play must either be in `pending` above or see this new connection.
+        *self.connection.write().unwrap() = Some(connection.clone());
     }
 }
 
@@ -1215,7 +1234,6 @@ fn spawn_session_supervisor(client: &NativeSpotify, spirc_task: tokio::task::Joi
             match reconnect(&inner).await {
                 Ok(opened) => {
                     let connection = opened.connection;
-                    *inner.connection.write().unwrap() = Some(connection.clone());
                     spirc_task = Some(opened.spirc_task);
                     backoff = RECONNECT_MIN_BACKOFF;
                     eprintln!("Spotify session reconnected");

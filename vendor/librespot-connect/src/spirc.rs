@@ -36,8 +36,8 @@ use librespot_protocol::context_page::ContextPage;
 use protobuf::MessageField;
 use std::{
     future::Future,
-    sync::{Arc, Mutex},
     sync::atomic::{AtomicUsize, Ordering},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
@@ -170,8 +170,16 @@ pub struct RemotePlayerState {
 
 fn remote_player_state_from_cluster(cluster: &Cluster) -> Option<RemotePlayerState> {
     let state = cluster.player_state.as_ref()?;
-    let track_uri = state.track.as_ref().map(|track| track.uri.clone()).unwrap_or_default();
-    let metadata = state.track.as_ref().map(|track| track.metadata.clone()).unwrap_or_default();
+    let track_uri = state
+        .track
+        .as_ref()
+        .map(|track| track.uri.clone())
+        .unwrap_or_default();
+    let metadata = state
+        .track
+        .as_ref()
+        .map(|track| track.metadata.clone())
+        .unwrap_or_default();
 
     let position_ms = state.position_as_of_timestamp.max(0) as u64;
     let elapsed_ms = if state.is_playing && state.timestamp > 0 {
@@ -189,7 +197,9 @@ fn remote_player_state_from_cluster(cluster: &Cluster) -> Option<RemotePlayerSta
         track_uri,
         context_uri: state.context_uri.clone(),
         metadata,
-        position_ms: position_ms.saturating_add(elapsed_ms).min(state.duration.max(0) as u64),
+        position_ms: position_ms
+            .saturating_add(elapsed_ms)
+            .min(state.duration.max(0) as u64),
         duration_ms: state.duration.max(0) as u64,
         is_playing: state.is_playing,
     })
@@ -332,6 +342,11 @@ impl Spirc {
         };
 
         Ok((spirc, task.run()))
+    }
+
+    /// Whether the Connect task has stopped accepting commands.
+    pub fn is_invalid(&self) -> bool {
+        self.commands.is_closed()
     }
 
     /// Safely shutdowns the spirc.
@@ -1903,12 +1918,37 @@ mod tests {
     use librespot_protocol::player::{PlayerState, ProvidedTrack};
 
     #[test]
+    fn closed_command_receiver_invalidates_all_spirc_handles() {
+        let (commands, mut receiver) = mpsc::unbounded_channel();
+        let spirc = Spirc {
+            commands,
+            remote_player_state: Arc::new(Mutex::new(None)),
+        };
+        let other = spirc.clone();
+        assert!(!spirc.is_invalid());
+        spirc.activate().expect("live receiver accepts activation");
+        assert!(matches!(receiver.try_recv(), Ok(SpircCommand::Activate)));
+
+        // The command receiver can close before the task itself finishes cleanup.
+        receiver.close();
+        assert!(spirc.is_invalid());
+        assert!(other.is_invalid());
+        assert!(spirc.activate().is_err());
+        assert!(
+            other
+                .load(LoadRequest::from_context_uri(
+                    "spotify:playlist:example".into(),
+                    LoadRequestOptions::default(),
+                ))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn exposes_server_player_state_without_local_transfer() {
         let mut track = ProvidedTrack::new();
         track.uri = "spotify:track:from-server".into();
-        track
-            .metadata
-            .insert("title".into(), "Server track".into());
+        track.metadata.insert("title".into(), "Server track".into());
 
         let mut player_state = PlayerState::new();
         player_state.track = MessageField::some(track);

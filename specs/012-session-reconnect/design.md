@@ -61,6 +61,10 @@ struct NativeInner {
 - `SessionConnection::alive` stops the previous connect-state polling task before it can overwrite
   playback state from a dead Spirc.
 - `pending_load` holds a play/load request issued during reconnection. The latest request wins.
+- Connection health also checks whether the Spirc command receiver is closed. Command failures
+  invalidate that session and wake the supervisor.
+- Load submission and reconnect publication serialize on `pending_load`. Replay sends activation
+  and load before publishing the replacement; failure retains the request for the next rebuild.
 
 ## Startup and reconnect flow
 
@@ -70,14 +74,18 @@ struct NativeInner {
    reconnects when any of these is true:
    - the current session is invalid,
    - the current Spirc task has finished,
+   - the Spirc command receiver is closed,
    - the player thread has finished.
 3. Reconnect first freezes playback (see below), removes and invalidates the old connection, stops
    its polling task, aborts its Spirc task and shuts the old session down.
-4. It refreshes the OAuth token, rebuilds `Session` and `Spirc`, restores the player session, swaps
-   the new connection into `NativeInner`, and records the new Spirc task handle.
+4. It refreshes the OAuth token, rebuilds `Session` and `Spirc`, restores the player session, and
+   records the new Spirc task handle.
 5. Failures retry with 2 s → 30 s exponential backoff. A rejected refresh token signs the user out
    and stops the supervisor.
 6. After success it applies a queued `pending_load`, otherwise it applies the automatic resume.
+   It publishes the new connection under the pending-load lock only after successful sends.
+   Failed sends retain the load, stop that connection's connect-state poller, invalidate its
+   session, and trigger another rebuild.
 
 `Session::new` runs inside the runtime context. `Spirc::new`'s returned future is spawned on the
 same runtime and its `JoinHandle` is kept by the supervisor so a dead task can be aborted and
