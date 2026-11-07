@@ -586,8 +586,6 @@ impl Render for PlayerBar {
             .gap(px(16.0))
             .px(px(16.0))
             .bg(rgb(0x000000))
-            .border_t_1()
-            .border_color(rgb(0x1f1f1f))
             .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
                 down_weak
                     .update(cx, |this, cx| {
