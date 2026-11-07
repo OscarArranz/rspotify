@@ -548,6 +548,41 @@ impl LibrarySidebar {
         }
     }
 
+    fn play_first_playlist_track(&mut self, entry: &LibraryEntry, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let source = PlaylistSource::Playlist {
+            uri: entry.uri.clone(),
+            name: entry.name.clone(),
+            owner: entry.owner.clone(),
+            image_url: entry
+                .image_url
+                .clone()
+                .or_else(|| entry.covers.first().cloned()),
+        };
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let result = client.playlist_detail(source).and_then(|detail| {
+                if let Some((context_uri, track_uri)) = first_track_request(&detail) {
+                    client.play_context_at(&context_uri, &track_uri)
+                } else {
+                    Ok(())
+                }
+            });
+            let _ = tx.send(result);
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Err(error)) = rx.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.error = Some(error.to_string());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     fn toggle_pin(&mut self, entry: &LibraryEntry, cx: &mut Context<Self>) {
         if self.pin_busy || entry.pinned.is_none() {
             return;
@@ -623,6 +658,7 @@ impl LibrarySidebar {
         let click_entry = entry.clone();
         let menu_entry = entry.clone();
         let play_uri = entry.uri.clone();
+        let play_entry = entry.clone();
         let weak = cx.entity().downgrade();
         let context_weak = weak.clone();
         let keyboard_selected =
@@ -650,7 +686,12 @@ impl LibrarySidebar {
             .hover(|s| s.bg(rgb(if selected { 0x393939 } else { 0x242424 })))
             .cursor_pointer()
             .on_click(
-                cx.listener(move |this, _, window, cx| this.open(click_entry.clone(), window, cx)),
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    if should_play_first_track(click_entry.kind, event.click_count()) {
+                        this.play_first_playlist_track(&click_entry, cx);
+                    }
+                    this.open(click_entry.clone(), window, cx);
+                }),
             )
             .on_hover(cx.listener(move |this, hover: &bool, _, cx| {
                 this.hovered_entry = hover.then_some(index);
@@ -691,10 +732,19 @@ impl LibrarySidebar {
                                     .bg(rgba(0x00000066))
                                     .opacity(0.0)
                                     .group_hover("library-row", |s| s.opacity(1.0))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.play(&play_uri, cx);
-                                    }))
+                                    .on_click(cx.listener(
+                                        move |this, event: &gpui::ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            if should_play_first_track(
+                                                play_entry.kind,
+                                                event.click_count(),
+                                            ) {
+                                                this.play_first_playlist_track(&play_entry, cx);
+                                            } else {
+                                                this.play(&play_uri, cx);
+                                            }
+                                        },
+                                    ))
                                     .child(icon(
                                         if playing {
                                             "icons/pause.svg"
@@ -1226,4 +1276,49 @@ fn cover(entry: &LibraryEntry, size: f32) -> AnyElement {
             if liked { 0xffffff } else { MUTED },
         ))
         .into_any_element()
+}
+
+fn should_play_first_track(kind: LibraryKind, click_count: usize) -> bool {
+    kind == LibraryKind::Playlist && click_count == 2
+}
+
+fn first_track_request(detail: &crate::lib::spotify::PlaylistDetail) -> Option<(String, String)> {
+    detail
+        .tracks
+        .first()
+        .map(|track| (detail.context_uri.clone(), track.uri.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lib::spotify::PlaylistDetail;
+
+    #[test]
+    fn only_playlist_double_click_requests_first_track_playback() {
+        assert!(should_play_first_track(LibraryKind::Playlist, 2));
+        assert!(!should_play_first_track(LibraryKind::Playlist, 1));
+        assert!(!should_play_first_track(LibraryKind::Folder, 2));
+        assert!(!should_play_first_track(LibraryKind::LikedSongs, 2));
+    }
+
+    #[test]
+    fn first_track_request_uses_context_and_first_track_uri() {
+        let mut detail = PlaylistDetail::default();
+        detail.context_uri = "spotify:playlist:context".into();
+        detail.tracks.push(Default::default());
+        detail.tracks[0].uri = "spotify:track:first".into();
+        detail.tracks.push(Default::default());
+        detail.tracks[1].uri = "spotify:track:second".into();
+
+        assert_eq!(
+            first_track_request(&detail),
+            Some((
+                "spotify:playlist:context".into(),
+                "spotify:track:first".into()
+            ))
+        );
+        detail.tracks.clear();
+        assert_eq!(first_track_request(&detail), None);
+    }
 }
