@@ -152,3 +152,4 @@ The playback test starts audio. Pause or stop playback and do not leave the app 
   OAuth token refresh with rotation, playback resume and queued play requests, and sign-out routing
   for a revoked token. Implemented; offline validation recorded; ignored live reconnect test not
   run yet.
+- `specs/015-prevent-sleep-during-playback/` — Linux system sleep inhibition while local playback is active; display power-down remains available. Implemented; offline validation and desktop sleep behavior check pending.

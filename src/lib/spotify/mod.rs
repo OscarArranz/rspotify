@@ -15,6 +15,7 @@ pub(crate) mod library;
 pub(crate) mod library_catalog;
 mod playlist;
 mod search;
+mod sleep_inhibitor;
 mod store;
 
 pub use artist::{

@@ -28,6 +28,7 @@ use super::artist::{self, ArtistProfile};
 use super::error::SpotifyError;
 use super::playlist::{self, PlaylistDetail, PlaylistPage, PlaylistSource};
 use super::search::{self, SearchResults};
+use super::sleep_inhibitor::SleepInhibitor;
 use super::store::{SessionStore, StoredProfile};
 
 /// Spotify's own desktop client id. The same id is used by librespot for keymaster
@@ -1328,9 +1329,11 @@ fn spawn_player_event_loop(
 ) {
     let mut events = player.get_player_event_channel();
     runtime.spawn(async move {
+        let mut inhibitor = SleepInhibitor::default();
         while let Some(event) = events.recv().await {
             let mut inner = playback.lock().unwrap();
             apply_player_event(&mut inner, event, Instant::now());
+            inhibitor.set_playing(inner.snapshot.is_playing);
         }
     });
 }
