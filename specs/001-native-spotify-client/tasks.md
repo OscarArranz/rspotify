@@ -30,6 +30,13 @@
 - [x] Keep cached UI on transient startup restoration errors; clear invalid credentials and route
   to sign-in only after confirmed rejection.
 - [x] Show custom titlebar window controls only on Windows, leaving Linux system decorations intact.
+- [x] Bind titlebar back/forward arrow colors to history availability; remove unused hover state.
+- [x] Validate navigation rendering and history transitions headlessly and run Rust checks.
+  Temporary GPUI smoke rendered the actual navigation component and exercised disabled root,
+  back, forward, intermediate history, and Home transitions through simulated clicks; passed.
+  Removed the temporary harness afterward. `cargo fmt --check`, `cargo check`, and `cargo test`
+  passed (84 passed, 13 ignored). Desktop color appearance was not visually checked; no account
+  access or playback was used. Existing `proc-macro-error2` future-incompatibility warning remains.
 
 ## Validation
 

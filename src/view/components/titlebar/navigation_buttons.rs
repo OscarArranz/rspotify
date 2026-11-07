@@ -1,8 +1,8 @@
 //! Back and Forward navigation buttons component.
 
 use gpui::{
-    App, Div, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement, Stateful,
-    Styled, Window, div, prelude::FluentBuilder, px,
+    App, Div, InteractiveElement, IntoElement, MouseButton, ParentElement, Stateful, Styled,
+    Window, div, prelude::FluentBuilder, px,
 };
 
 use crate::{
@@ -10,12 +10,7 @@ use crate::{
     view::components::icons::{back_icon, forward_icon},
 };
 
-struct NavigationButtonsState {
-    back_button_is_hovered: bool,
-    forward_button_is_hovered: bool,
-}
-
-pub fn navigation_buttons(window: &mut Window, cx: &mut App) -> impl IntoElement {
+pub fn navigation_buttons(_window: &mut Window, cx: &mut App) -> impl IntoElement {
     let stack_nav = use_stack_nav(cx);
     let nav_for_click = stack_nav.clone();
 
@@ -24,13 +19,6 @@ pub fn navigation_buttons(window: &mut Window, cx: &mut App) -> impl IntoElement
             let nav = nav.clone();
             let can_go_back = nav.can_go_back(cx);
             let can_go_forward = nav.can_go_forward(cx);
-            let state: Entity<NavigationButtonsState> =
-                window.use_state(cx, |_window, _cx| NavigationButtonsState {
-                    back_button_is_hovered: false,
-                    forward_button_is_hovered: false,
-                });
-            let back_button_is_hovered = state.read(cx).back_button_is_hovered;
-            let forward_button_is_hovered = state.read(cx).forward_button_is_hovered;
 
             div()
                 .flex()
@@ -55,7 +43,7 @@ pub fn navigation_buttons(window: &mut Window, cx: &mut App) -> impl IntoElement
                                     }
                                 })
                         })
-                        .child(div().child(back_icon(back_button_is_hovered))),
+                        .child(div().child(back_icon(can_go_back))),
                 )
                 .child(
                     div()
@@ -73,7 +61,7 @@ pub fn navigation_buttons(window: &mut Window, cx: &mut App) -> impl IntoElement
                                     }
                                 })
                         })
-                        .child(div().child(forward_icon(forward_button_is_hovered))),
+                        .child(div().child(forward_icon(can_go_forward))),
                 )
         }
         None => div(),

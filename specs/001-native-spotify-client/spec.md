@@ -21,6 +21,8 @@ the user's library, and play audio locally through a Spotify Connect device.
   playlists. The player bar shows the current track, progress, and playback controls.
 - Custom minimize, maximize, and close controls are shown on Windows only; Linux keeps its system
   window decorations without duplicate controls in the titlebar.
+- Titlebar back/forward arrows are white whenever the corresponding history action is available,
+  and grey and non-clickable otherwise, independently of hover.
 - Search is grouped into All, Songs, Artists, Albums, Playlists, and Podcasts & Shows tabs.
   Clicking a track or episode starts single-track playback; clicking another result starts that
   context.

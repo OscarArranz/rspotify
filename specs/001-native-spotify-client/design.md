@@ -34,6 +34,10 @@ invalidate a running panel's icon-loader cache. No desktop restart or Flatpak re
 | `src/view/main_layout.rs` | Resizable library/content split, library fetch, home screen, player bar, polling |
 | `src/router/` | Path routing between sign-in and main; stack navigation inside main |
 
+Titlebar navigation reads `can_go_back` and `can_go_forward` from the existing stack router on
+each render. These values control both the arrow's white/grey SVG tint and its click handler;
+there is no separate hover state for navigation availability.
+
 `NativeSpotify` is a cloneable `Arc<NativeInner>` handle. `NativeInner` owns:
 
 - a replaceable `SessionConnection` (`Session`, `Spirc`, and an `alive` flag for its polling task),
