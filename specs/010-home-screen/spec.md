@@ -12,6 +12,7 @@ Replace the welcome placeholder with a personalized Spotify-style Home, populate
 - Loading, empty and failure states are clear, and unsupported feed content or actions are not presented as working.
 - Network work never blocks the UI; no public Web API or personal data in fixtures or logs.
 - Home works after session restoration and authentication, and navigation back to it is sensible.
+- The top-bar Home icon uses a filled white icon while the Home screen is active.
 
 ## Validation
 

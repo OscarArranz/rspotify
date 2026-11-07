@@ -12,16 +12,14 @@ use super::BUTTON_HOVER_BG;
 
 struct HomeButtonState {
     is_hovered: bool,
-    is_active: bool,
 }
 
 pub fn home_button(window: &mut Window, cx: &mut App) -> impl IntoElement {
-    let state: Entity<HomeButtonState> = window.use_state(cx, |_window, _cx| HomeButtonState {
-        is_hovered: false,
-        is_active: false,
-    });
+    let nav = cx.try_global::<StackRouterHandle>().cloned();
+    let state: Entity<HomeButtonState> =
+        window.use_state(cx, |_window, _cx| HomeButtonState { is_hovered: false });
     let is_hovered = state.read(cx).is_hovered;
-    let is_active = state.read(cx).is_active;
+    let is_active = nav.as_ref().is_some_and(|nav| nav.is_home(cx));
 
     div()
         .id("home-btn")

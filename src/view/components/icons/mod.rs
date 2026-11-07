@@ -37,10 +37,10 @@ pub fn icon_with_hover_and_active_state(
     let base_icon = svg().path(icon_path.to_string()).size(size.clone());
     let active_icon = svg().path(active_icon_path.to_string()).size(size.clone());
 
-    if is_hovered {
+    if is_active {
+        active_icon.text_color(gpui::white())
+    } else if is_hovered {
         base_icon.text_color(hover_color)
-    } else if is_active {
-        active_icon.text_color(hover_color)
     } else {
         base_icon.text_color(base_color)
     }
