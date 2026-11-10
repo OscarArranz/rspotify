@@ -13,6 +13,7 @@ use crate::state::AppState;
 use crate::view::components::smooth_scroll::{
     SmoothScrollElement, SmoothScrollState, list_scroll_overlay, nested_scroll_region,
 };
+use crate::view::components::track_title::{open_album, track_title};
 use crate::view::screens::artist::{ArtistScreen, ArtistSource};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,7 +213,8 @@ fn track_row(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl In
                 .flex()
                 .flex_col()
                 .flex_1()
-                .child(item.title.clone())
+                .min_w(px(0.0))
+                .child(track_title(&item.title, &item.uri, None))
                 .child(
                     div()
                         .text_sm()
@@ -234,6 +236,7 @@ fn album_card(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl I
     let title = item.title.clone();
     let image = item.image.clone();
     let is_artist = item.kind == "Artist";
+    let is_album = item.kind == "Album";
     div()
         .id((item.kind, index))
         .w(px(148.0))
@@ -248,6 +251,8 @@ fn album_card(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl I
         .on_click(move |_, _, cx| {
             if is_artist {
                 open_artist_profile(&uri, &title, image.clone(), cx);
+            } else if is_album {
+                open_album(&uri, cx);
             } else {
                 let _ = client.play_context(&uri);
             }
@@ -424,6 +429,9 @@ fn top_result_card(item: &SearchItem, client: &NativeSpotify) -> AnyElement {
     let top_image = item.image.clone();
     let top_is_song = matches!(item.kind, "Song" | "Episode");
     let top_is_artist = item.kind == "Artist";
+    let top_is_album = item.kind == "Album";
+    let album_play_client = client.clone();
+    let album_play_uri = item.uri.clone();
     let client = client.clone();
     div()
         .id("top-result-card")
@@ -440,6 +448,8 @@ fn top_result_card(item: &SearchItem, client: &NativeSpotify) -> AnyElement {
                 open_artist_profile(&top_uri, &top_title, top_image.clone(), cx);
             } else if top_is_song {
                 let _ = client.play_track(&top_uri);
+            } else if top_is_album {
+                open_album(&top_uri, cx);
             } else {
                 let _ = client.play_context(&top_uri);
             }
@@ -450,7 +460,8 @@ fn top_result_card(item: &SearchItem, client: &NativeSpotify) -> AnyElement {
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
-                .child(item.title.clone())
+                .min_w(px(0.0))
+                .child(track_title(&item.title, &item.uri, None))
                 .child(
                     div()
                         .text_sm()
@@ -461,6 +472,7 @@ fn top_result_card(item: &SearchItem, client: &NativeSpotify) -> AnyElement {
         .child(div().flex_1())
         .child(
             div()
+                .id("top-result-play")
                 .size(px(44.0))
                 .rounded_full()
                 .bg(rgb(0x1ed760))
@@ -469,6 +481,12 @@ fn top_result_card(item: &SearchItem, client: &NativeSpotify) -> AnyElement {
                 .justify_center()
                 .text_color(rgb(0x000000))
                 .font_weight(gpui::FontWeight::BOLD)
+                .on_click(move |_, _, cx| {
+                    if top_is_album {
+                        cx.stop_propagation();
+                        let _ = album_play_client.play_context(&album_play_uri);
+                    }
+                })
                 .child(
                     svg()
                         .path("icons/play.svg")

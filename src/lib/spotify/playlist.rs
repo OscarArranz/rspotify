@@ -1,8 +1,8 @@
 //! Native playlist and context loading for the playlist detail screen.
 //!
-//! Playlist metadata comes from Spotify's `playlist4_external` protobuf endpoint
-//! (`Playlist::get`). Track metadata and pagination come from the native
-//! context-resolve endpoint (`SpClient::get_context` / `get_next_page`).
+//! Playlist and release metadata come from Spotify's native protobuf endpoints.
+//! Track metadata and pagination come from the native context-resolve endpoint
+//! (`SpClient::get_context` / `get_next_page`) and extended metadata.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -10,13 +10,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use librespot::core::{Session, SpotifyId, SpotifyUri};
-use librespot::metadata::{Metadata, Playlist};
+use librespot::metadata::{Album, Metadata, Playlist};
 use librespot::protocol::{
     context::Context,
     context_track::ContextTrack,
     extended_metadata::{BatchedEntityRequest, EntityRequest, ExtensionQuery},
     extension_kind::ExtensionKind,
-    metadata::{Episode as EpisodeMessage, Track as TrackMessage},
+    metadata::{Album as AlbumMessage, Episode as EpisodeMessage, Track as TrackMessage},
 };
 use protobuf::{EnumOrUnknown, Message};
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,9 @@ pub enum PlaylistSource {
         image_url: Option<String>,
         kind: &'static str,
     },
+    TrackAlbum {
+        track_uri: String,
+    },
     LikedSongs,
 }
 
@@ -54,6 +57,7 @@ impl PlaylistSource {
     pub fn preview_name(&self) -> &str {
         match self {
             Self::Playlist { name, .. } | Self::Context { name, .. } => name,
+            Self::TrackAlbum { .. } => "Album",
             Self::LikedSongs => "Liked Songs",
         }
     }
@@ -61,7 +65,7 @@ impl PlaylistSource {
     pub fn preview_owner(&self) -> &str {
         match self {
             Self::Playlist { owner, .. } | Self::Context { owner, .. } => owner,
-            Self::LikedSongs => "",
+            Self::LikedSongs | Self::TrackAlbum { .. } => "",
         }
     }
 
@@ -70,13 +74,14 @@ impl PlaylistSource {
             Self::Playlist { image_url, .. } | Self::Context { image_url, .. } => {
                 image_url.as_deref()
             }
-            Self::LikedSongs => None,
+            Self::LikedSongs | Self::TrackAlbum { .. } => None,
         }
     }
 
     pub fn kind_label(&self) -> &'static str {
         match self {
             Self::Context { kind, .. } => kind,
+            Self::TrackAlbum { .. } => "Album",
             _ => "Playlist",
         }
     }
@@ -96,7 +101,18 @@ pub struct PlaylistDetail {
     pub is_liked_songs: bool,
     pub tracks: Vec<PlaylistTrack>,
     pub next_page_url: Option<String>,
+    #[serde(default)]
+    pub album: Option<AlbumMetadata>,
     pub(crate) added_at: HashMap<String, i64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AlbumMetadata {
+    pub kind: String,
+    pub release_year: Option<i32>,
+    pub release_date: String,
+    pub artist_credits: Vec<ArtistCredit>,
+    pub copyrights: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -107,6 +123,8 @@ pub struct PlaylistTrack {
     #[serde(default)]
     pub artist_credits: Vec<ArtistCredit>,
     pub album: String,
+    #[serde(default)]
+    pub album_uri: Option<String>,
     pub image_url: Option<String>,
     pub duration_ms: u64,
     pub added_at_ms: Option<i64>,
@@ -150,6 +168,9 @@ impl PlaylistDetail {
 fn detail_cache_path(account: &str, source: &PlaylistSource) -> PathBuf {
     let identity = match source {
         PlaylistSource::Playlist { uri, .. } | PlaylistSource::Context { uri, .. } => uri.as_str(),
+        PlaylistSource::TrackAlbum { track_uri } => {
+            return detail_cache_path_for_identity(account, &format!("album-for:{track_uri}"));
+        }
         // Use the same collection URI used by the native context request. Keep the
         // account in the key as an extra guard against sharing private library data.
         PlaylistSource::LikedSongs => {
@@ -253,14 +274,213 @@ pub async fn fetch_playlist_detail(
             image_url,
         } => fetch_saved_playlist(session, uri, name, owner, image_url).await,
         PlaylistSource::LikedSongs => fetch_liked_songs(session).await,
+        PlaylistSource::TrackAlbum { track_uri } => {
+            let parsed = SpotifyUri::from_uri(&track_uri)
+                .map_err(|error| SpotifyError::Api(format!("track album URI: {error}")))?;
+            if !matches!(parsed, SpotifyUri::Track { .. }) {
+                return Err(SpotifyError::Api(
+                    "Only a Spotify song can resolve to an album".into(),
+                ));
+            }
+            let bytes = librespot::metadata::Track::request(session, &parsed)
+                .await
+                .map_err(|error| {
+                    SpotifyError::Api(format!("Could not resolve the song's album: {error}"))
+                })?;
+            let track = TrackMessage::parse_from_bytes(&bytes)
+                .map_err(|error| SpotifyError::Api(format!("song metadata protobuf: {error}")))?;
+            let album_uri = track
+                .album
+                .as_ref()
+                .and_then(album_uri_from_message)
+                .ok_or_else(|| {
+                    SpotifyError::Api("Native song metadata did not provide an album".into())
+                })?;
+            fetch_album_detail(session, album_uri).await
+        }
         PlaylistSource::Context {
             uri,
             name,
             owner,
             image_url,
             ..
-        } => fetch_catalog_context(session, uri, name, owner, image_url).await,
+        } => {
+            if uri.starts_with("spotify:album:") {
+                fetch_album_detail(session, uri).await
+            } else {
+                fetch_catalog_context(session, uri, name, owner, image_url).await
+            }
+        }
     }
+}
+
+async fn fetch_album_detail(
+    session: &Session,
+    uri: String,
+) -> Result<PlaylistDetail, SpotifyError> {
+    let parsed = SpotifyUri::from_uri(&uri)
+        .map_err(|error| SpotifyError::Api(format!("album URI: {error}")))?;
+    if !matches!(parsed, SpotifyUri::Album { .. }) {
+        return Err(SpotifyError::Api("Expected a Spotify album URI".into()));
+    }
+    // Album::get normalizes missing date components to January 1. Decode its
+    // native response directly so a year-only release never acquires a fake date.
+    let bytes = Album::request(session, &parsed)
+        .await
+        .map_err(|error| SpotifyError::Api(format!("Could not load album metadata: {error}")))?;
+    let album = AlbumMessage::parse_from_bytes(&bytes)
+        .map_err(|error| SpotifyError::Api(format!("album metadata protobuf: {error}")))?;
+    let uri = album_uri_from_message(&album)
+        .or_else(|| parsed.to_uri().ok())
+        .ok_or_else(|| SpotifyError::Api("Album metadata has no valid identity".into()))?;
+    if non_empty(album.name()).is_none() {
+        return Err(SpotifyError::Api(
+            "Native album metadata did not provide a release title".into(),
+        ));
+    }
+    let context = session
+        .spclient()
+        .get_context(&uri)
+        .await
+        .map_err(|error| SpotifyError::Api(format!("Could not load album songs: {error}")))?;
+    let (mut tracks, next_page_url) = context_tracks(&context, &HashMap::new());
+    hydrate_tracks(session, &mut tracks).await;
+    let mut detail = album_detail_from_context(&album, uri, &context, tracks, next_page_url);
+    if let Some(url) = detail.image_url.as_deref() {
+        detail.accent = sample_accent(url).await.unwrap_or(FALLBACK_ACCENT);
+    }
+    Ok(detail)
+}
+
+fn album_detail_from_context(
+    album: &AlbumMessage,
+    uri: String,
+    context: &Context,
+    tracks: Vec<PlaylistTrack>,
+    next_page_url: Option<String>,
+) -> PlaylistDetail {
+    let metadata = album_metadata_from_message(album);
+    let owner_name = metadata
+        .artist_credits
+        .iter()
+        .map(|credit| credit.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let native_count = (!album.disc.is_empty())
+        .then(|| {
+            album
+                .disc
+                .iter()
+                .map(|disc| disc.track.len())
+                .sum::<usize>()
+        })
+        .filter(|count| *count > 0);
+    let track_count = context_track_count(context)
+        .or(native_count)
+        .or_else(|| next_page_url.is_none().then_some(tracks.len()));
+    let total_duration_ms = context_duration_ms(context).or_else(|| {
+        (next_page_url.is_none()
+            && !tracks.is_empty()
+            && track_count.is_none_or(|count| count == tracks.len())
+            && tracks.iter().all(|track| track.duration_ms > 0))
+        .then(|| tracks.iter().map(|track| track.duration_ms).sum())
+    });
+    PlaylistDetail {
+        context_uri: uri,
+        name: album.name().trim().to_string(),
+        owner_name,
+        image_url: album_image_url(album),
+        accent: FALLBACK_ACCENT,
+        track_count,
+        total_duration_ms,
+        tracks,
+        next_page_url,
+        album: Some(metadata),
+        ..Default::default()
+    }
+}
+
+fn album_metadata_from_message(album: &AlbumMessage) -> AlbumMetadata {
+    use librespot::protocol::metadata::album::Type;
+
+    let native_kind = album.type_str().trim();
+    let kind = if native_kind.eq_ignore_ascii_case("single") {
+        "Single"
+    } else if native_kind.eq_ignore_ascii_case("ep") {
+        "EP"
+    } else {
+        match album.type_() {
+            Type::SINGLE => "Single",
+            Type::EP => "EP",
+            _ => "Album",
+        }
+    };
+    let (release_year, release_date) = album
+        .date
+        .as_ref()
+        .map(release_date_from_message)
+        .unwrap_or_default();
+    AlbumMetadata {
+        kind: kind.to_string(),
+        release_year,
+        release_date,
+        artist_credits: album
+            .artist
+            .iter()
+            .filter_map(artist_credit_from_message)
+            .collect(),
+        copyrights: album
+            .copyright
+            .iter()
+            .filter_map(|copyright| non_empty(copyright.text()).map(ToOwned::to_owned))
+            .collect(),
+    }
+}
+
+fn release_date_from_message(date: &librespot::protocol::metadata::Date) -> (Option<i32>, String) {
+    let Some(year) = date.year.filter(|year| (1..=9999).contains(year)) else {
+        return (None, String::new());
+    };
+    let mut text = format!("{year:04}");
+    let Some(month) = date.month.filter(|month| (1..=12).contains(month)) else {
+        return (Some(year), text);
+    };
+    text.push_str(&format!("-{month:02}"));
+    if let Some(day) = date.day.filter(|day| (1..=31).contains(day)) {
+        if librespot::core::date::Date::try_from(date).is_ok() {
+            text.push_str(&format!("-{day:02}"));
+        }
+    }
+    (Some(year), text)
+}
+
+fn canonical_album_uri(uri: &str) -> Option<String> {
+    let parsed = SpotifyUri::from_uri(uri).ok()?;
+    matches!(parsed, SpotifyUri::Album { .. })
+        .then(|| parsed.to_uri().ok())
+        .flatten()
+}
+
+fn album_uri_from_message(album: &AlbumMessage) -> Option<String> {
+    let id = SpotifyId::from_raw(album.gid.as_deref()?).ok()?;
+    Some(format!("spotify:album:{}", id.to_base62().ok()?))
+}
+
+fn artist_credit_from_message(
+    artist: &librespot::protocol::metadata::Artist,
+) -> Option<ArtistCredit> {
+    let name = non_empty(artist.name())?;
+    let uri = artist
+        .gid
+        .as_deref()
+        .and_then(|gid| SpotifyId::from_raw(gid).ok())
+        .and_then(|id| id.to_base62().ok())
+        .map(|id| format!("spotify:artist:{id}"))
+        .unwrap_or_default();
+    Some(ArtistCredit {
+        name: name.to_string(),
+        uri,
+    })
 }
 
 async fn fetch_catalog_context(
@@ -381,6 +601,7 @@ async fn fetch_saved_playlist(
         is_liked_songs: false,
         tracks,
         next_page_url,
+        album: None,
         added_at,
     })
 }
@@ -413,6 +634,7 @@ async fn fetch_liked_songs(session: &Session) -> Result<PlaylistDetail, SpotifyE
         is_liked_songs: true,
         tracks,
         next_page_url,
+        album: None,
         added_at: HashMap::new(),
     })
 }
@@ -500,6 +722,8 @@ fn track_from_metadata(
         artist,
         artist_credits: Vec::new(),
         album,
+        album_uri: metadata_value(metadata, &["album_uri"])
+            .and_then(|uri| canonical_album_uri(&uri)),
         image_url,
         duration_ms,
         added_at_ms,
@@ -523,6 +747,7 @@ pub(crate) struct HydratedTrack {
     pub(crate) artist: String,
     pub(crate) artist_credits: Vec<ArtistCredit>,
     pub(crate) album: String,
+    pub(crate) album_uri: Option<String>,
     pub(crate) image_url: Option<String>,
     pub(crate) duration_ms: u64,
     explicit: bool,
@@ -594,7 +819,8 @@ fn needs_metadata(track: &PlaylistTrack) -> bool {
         && (track.title.is_empty()
             || track.title == "Unknown track"
             || track.artist.is_empty()
-            || (track.uri.starts_with("spotify:track:") && track.artist_credits.is_empty())
+            || (track.uri.starts_with("spotify:track:")
+                && (track.artist_credits.is_empty() || track.album_uri.is_none()))
             || track.image_url.is_none()
             || track.duration_ms == 0)
 }
@@ -674,29 +900,14 @@ fn hydrated_track_from_message(track: &TrackMessage) -> Option<HydratedTrack> {
     let artist_credits = track
         .artist
         .iter()
-        .filter_map(|artist| {
-            let name = artist.name.as_deref()?.trim();
-            if name.is_empty() {
-                return None;
-            }
-            let uri = artist
-                .gid
-                .as_deref()
-                .and_then(|gid| SpotifyId::from_raw(gid).ok())
-                .and_then(|id| id.to_base62().ok())
-                .map(|id| format!("spotify:artist:{id}"))
-                .unwrap_or_default();
-            Some(ArtistCredit {
-                name: name.to_string(),
-                uri,
-            })
-        })
+        .filter_map(artist_credit_from_message)
         .collect();
     let album = track
         .album
         .as_ref()
         .map(|album| album.name().trim().to_string())
         .unwrap_or_default();
+    let album_uri = track.album.as_ref().and_then(album_uri_from_message);
     let image_url = track.album.as_ref().and_then(album_image_url);
 
     Some(HydratedTrack {
@@ -704,6 +915,7 @@ fn hydrated_track_from_message(track: &TrackMessage) -> Option<HydratedTrack> {
         artist,
         artist_credits,
         album,
+        album_uri,
         image_url,
         duration_ms: track.duration().max(0) as u64,
         explicit: track.explicit(),
@@ -727,6 +939,7 @@ fn hydrated_episode_from_message(episode: &EpisodeMessage) -> Option<HydratedTra
         artist: show_name.clone(),
         artist_credits: Vec::new(),
         album: show_name,
+        album_uri: None,
         image_url,
         duration_ms: episode.duration().max(0) as u64,
         explicit: episode.explicit(),
@@ -772,6 +985,9 @@ fn apply_hydrated(track: &mut PlaylistTrack, metadata: &HydratedTrack) {
     }
     if !metadata.album.is_empty() {
         track.album = metadata.album.clone();
+    }
+    if metadata.album_uri.is_some() {
+        track.album_uri = metadata.album_uri.clone();
     }
     if metadata.image_url.is_some() {
         track.image_url = metadata.image_url.clone();
@@ -1225,6 +1441,7 @@ mod tests {
 
         let mut album = Album::new();
         album.name = Some("Album".to_string());
+        album.gid = Some(vec![0x34; 16]);
         album.cover_group = MessageField::some(cover_group);
 
         let mut artist = Artist::new();
@@ -1252,10 +1469,167 @@ mod tests {
             format!("spotify:artist:{id}")
         );
         assert_eq!(hydrated.album, "Album");
+        let album_id = SpotifyId::from_raw(&[0x34; 16])
+            .unwrap()
+            .to_base62()
+            .unwrap();
+        let album_uri = format!("spotify:album:{album_id}");
+        assert_eq!(hydrated.album_uri.as_deref(), Some(album_uri.as_str()));
+        let mut track = PlaylistTrack::default();
+        apply_hydrated(&mut track, &hydrated);
+        assert_eq!(track.album_uri, hydrated.album_uri);
+        apply_hydrated(&mut track, &HydratedTrack::default());
+        assert_eq!(track.album_uri.as_deref(), Some(album_uri.as_str()));
         assert_eq!(hydrated.duration_ms, 123_456);
         assert!(hydrated.explicit);
         let expected_image = format!("https://i.scdn.co/image/{}", "ab".repeat(20));
         assert_eq!(hydrated.image_url.as_deref(), Some(expected_image.as_str()));
+    }
+
+    #[test]
+    fn album_identity_is_native_and_track_resolution_cache_is_source_scoped() {
+        let mut album = AlbumMessage::new();
+        album.name = Some("A title is not an identity".into());
+        assert!(album_uri_from_message(&album).is_none());
+        album.gid = Some(vec![1; 15]);
+        assert!(album_uri_from_message(&album).is_none());
+        assert!(canonical_album_uri("spotify:track:0000000000000000000000").is_none());
+        let source = PlaylistSource::TrackAlbum {
+            track_uri: "spotify:track:0000000000000000000001".into(),
+        };
+        assert_eq!(
+            detail_cache_path("alice", &source),
+            detail_cache_path_for_identity(
+                "alice",
+                "album-for:spotify:track:0000000000000000000001"
+            )
+        );
+        assert_ne!(
+            detail_cache_path("alice", &source),
+            detail_cache_path("bob", &source)
+        );
+        assert_ne!(
+            detail_cache_path("alice", &source),
+            detail_cache_path(
+                "alice",
+                &PlaylistSource::TrackAlbum {
+                    track_uri: "spotify:track:0000000000000000000002".into(),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn old_detail_caches_default_release_metadata_and_track_identity() {
+        let mut cached = serde_json::to_value(PlaylistDetail {
+            tracks: vec![PlaylistTrack::default()],
+            ..Default::default()
+        })
+        .unwrap();
+        cached.as_object_mut().unwrap().remove("album");
+        cached["tracks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("album_uri");
+        let loaded: PlaylistDetail = serde_json::from_value(cached).unwrap();
+        assert!(loaded.album.is_none());
+        assert!(loaded.tracks[0].album_uri.is_none());
+    }
+
+    #[test]
+    fn release_metadata_retains_kind_and_native_date_precision() {
+        use librespot::protocol::metadata::{Date, album::Type};
+        use protobuf::MessageField;
+
+        let mut album = AlbumMessage::new();
+        for (kind, label) in [
+            (Type::ALBUM, "Album"),
+            (Type::SINGLE, "Single"),
+            (Type::EP, "EP"),
+        ] {
+            album.type_ = Some(EnumOrUnknown::new(kind));
+            assert_eq!(album_metadata_from_message(&album).kind, label);
+        }
+        album.type_str = Some("ep".into());
+        album.type_ = Some(EnumOrUnknown::new(Type::SINGLE));
+        assert_eq!(album_metadata_from_message(&album).kind, "EP");
+        assert!(album_metadata_from_message(&album).release_year.is_none());
+        assert!(album_metadata_from_message(&album).release_date.is_empty());
+
+        let mut date = Date::new();
+        for (year, month, day, expected_year, expected_date) in [
+            (None, None, None, None, ""),
+            (Some(2024), None, None, Some(2024), "2024"),
+            (Some(2024), Some(2), None, Some(2024), "2024-02"),
+            (Some(2024), Some(2), Some(29), Some(2024), "2024-02-29"),
+            (Some(2023), Some(2), Some(29), Some(2023), "2023-02"),
+            (Some(2024), Some(13), Some(1), Some(2024), "2024"),
+            (Some(2024), Some(1), Some(257), Some(2024), "2024-01"),
+        ] {
+            date.year = year;
+            date.month = month;
+            date.day = day;
+            album.date = MessageField::some(date.clone());
+            let metadata = album_metadata_from_message(&album);
+            assert_eq!(metadata.release_year, expected_year);
+            assert_eq!(metadata.release_date, expected_date);
+        }
+    }
+
+    #[test]
+    fn album_detail_uses_authoritative_metadata_and_keeps_context_order() {
+        use librespot::protocol::metadata::{Artist, Copyright, Disc};
+
+        let mut album = AlbumMessage::new();
+        album.name = Some("Authoritative release".into());
+        let mut artist = Artist::new();
+        artist.name = Some("Release artist".into());
+        artist.gid = Some(vec![0x12; 16]);
+        album.artist.push(artist);
+        let mut copyright = Copyright::new();
+        copyright.text = Some("℗ Native label".into());
+        album.copyright.push(copyright);
+        let mut disc = Disc::new();
+        disc.track = vec![TrackMessage::new(); 3];
+        album.disc.push(disc);
+        let mut context = Context::new();
+        for uri in ["spotify:track:second", "spotify:track:first"] {
+            context.pages.push(Default::default());
+            let page = context.pages.last_mut().unwrap();
+            let mut track = ContextTrack::new();
+            track.uri = Some(uri.into());
+            track.metadata.insert("duration".into(), "120000".into());
+            page.tracks.push(track);
+        }
+        context.pages.last_mut().unwrap().next_page_url = Some("native-next".into());
+        let (tracks, next_page_url) = context_tracks(&context, &HashMap::new());
+        let detail = album_detail_from_context(
+            &album,
+            "spotify:album:0000000000000000000000".into(),
+            &context,
+            tracks,
+            next_page_url,
+        );
+        assert_eq!(detail.name, "Authoritative release");
+        assert_eq!(detail.owner_name, "Release artist");
+        assert_eq!(detail.track_count, Some(3));
+        assert_eq!(detail.total_duration_ms, None);
+        assert_eq!(detail.tracks[0].uri, "spotify:track:second");
+        assert_eq!(detail.tracks[1].uri, "spotify:track:first");
+        assert_eq!(detail.next_page_url.as_deref(), Some("native-next"));
+        assert_eq!(detail.album.unwrap().copyrights, ["℗ Native label"]);
+
+        album.disc[0].track.pop();
+        let (tracks, _) = context_tracks(&context, &HashMap::new());
+        let complete = album_detail_from_context(
+            &album,
+            "spotify:album:0000000000000000000000".into(),
+            &context,
+            tracks,
+            None,
+        );
+        assert_eq!(complete.track_count, Some(2));
+        assert_eq!(complete.total_duration_ms, Some(240_000));
     }
 
     #[test]

@@ -6,4 +6,5 @@ pub(crate) mod render_cache;
 pub mod resizable;
 pub(crate) mod smooth_scroll;
 pub mod titlebar;
+pub(crate) mod track_title;
 pub(crate) mod virtual_list;

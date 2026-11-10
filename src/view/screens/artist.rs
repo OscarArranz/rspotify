@@ -23,6 +23,7 @@ use crate::router::StackRouterHandle;
 use crate::view::components::smooth_scroll::{
     SmoothScrollState, list_scroll_overlay, nested_scroll_region,
 };
+use crate::view::components::track_title::track_title;
 use crate::view::components::virtual_list::virtual_horizontal_list;
 use crate::view::screens::playlist::PlaylistScreen;
 
@@ -563,7 +564,6 @@ impl ArtistScreen {
             .now_playing
             .as_ref()
             .is_some_and(|now| now.uri == track.uri);
-        let title = track.title.clone();
         let artists = track.artists.clone();
         let uri = track.uri.clone();
         let duration = format_duration(track.duration_ms);
@@ -608,7 +608,7 @@ impl ArtistScreen {
                             .text_size(px(15.0))
                             .text_color(rgb(if playing { 0x1ed760 } else { 0xffffff }))
                             .truncate()
-                            .child(title),
+                            .child(track_title(&track.title, &track.uri, None)),
                     )
                     .child(
                         div()

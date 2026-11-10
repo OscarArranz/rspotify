@@ -89,12 +89,11 @@ header can distinguish "this playlist is active" from "a track from this playlis
 
 Global state remains unchanged: `AppState` holds only the authenticated client handle.
 
-Spec 009 adds a `PlaylistSource::Context` preview for album and podcast library rows. Those
-sources reuse this track-page renderer but load their native context directly, without incorrectly
-calling `Playlist::get` on a non-playlist URI. Their cached identity is the context URI and their
-header kind comes from the source preview. Spec 010 supersedes the earlier artist behaviour:
-library and search artist entry points now push a dedicated `ArtistScreen` instead of reusing this
-page.
+Spec 009 adds a `PlaylistSource::Context` preview for album and podcast library rows. Spec 016
+adds authoritative native release metadata and an album-specific header/row layout inside this
+same virtualized screen, including a `TrackAlbum` source for song-title links without an album URI.
+Podcast contexts retain the generic track-page layout. Neither calls `Playlist::get` on a
+non-playlist URI. Spec 010 supplies a dedicated `ArtistScreen` for library and search artists.
 
 ## Rendering
 
@@ -121,6 +120,8 @@ return a playlist cover for the collection URI.
 - Shuffle toggles `set_shuffle(!snapshot.shuffle)`, and the icon is green while enabled.
 - A row click with a non-empty playable URI calls
   `play_context_at(context_uri, track_uri)`.
+- Song-title links (spec 016) consume the click and open the track's album/single/EP instead of
+  starting row playback. Artist-credit links similarly navigate without playing.
 - Search is local and case-insensitive over title, artist, and album. While a query is active, only
   loaded tracks are searched and pagination pauses; the field is labelled as a playlist search, not
   a global search.

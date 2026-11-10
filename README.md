@@ -16,6 +16,9 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
   idle Connect command channel closes before the session reports a disconnect. A revoked login
   still requires signing in again.
 - **Playlist detail**: saved playlists and Liked Songs open in a Spotify-style page with a large header, virtualized track list, local search, sort, context playback and per-row Like controls.
+- **Album navigation**: hover a song title to underline it; click to open its album, single or EP
+  without changing playback. Release pages reuse the virtualized detail view with native artwork,
+  artists, year, ordered songs and release information. Spec 016.
 - **Like/unlike songs**: the now-playing bar and every playlist/context page show Spotify's plus/check control backed by the native collection service. Unliking from Liked Songs removes the row from the open list.
 - **Artist profiles**: library and search artist results open a native artist page with a hero,
   popular tracks, discography filters, featuring/discovered-on/appears-on shelves, related artists,
@@ -49,9 +52,9 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 | User library sidebar | Native categories, Recents, filters, four layouts and pin commands; full parity pending |
 | Playlist detail + Liked Songs page | Implemented; visual and real-account checks pending |
 | Like/unlike songs (player bar + detail rows) | Implemented; live write validation pending |
-| Album/artist/podcast library navigation | Native context track page; dedicated entity layouts not yet |
+| Albums, singles and EPs | Native release-aware detail page and song-title navigation; offline checks pass, live/desktop checks pending |
 | Artist profiles | Implemented; read-only account probe passed, follow/unfollow and video playback unavailable |
-| Album/podcast library navigation | Native context track page; dedicated entity layouts not yet |
+| Podcast library navigation | Native context track page; dedicated podcast layout not yet |
 | Queue, lyrics | Not yet |
 
 The library redesign is **not yet a complete 1:1 implementation**: playlist/folder creation,

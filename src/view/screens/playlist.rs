@@ -14,7 +14,8 @@ use futures::channel::{mpsc, oneshot};
 use gpui::{
     AnyElement, AppContext, Context, Entity, InteractiveElement, IntoElement, ListAlignment,
     ListScrollEvent, ListState, ParentElement, Render, StatefulInteractiveElement, Styled,
-    Subscription, Window, div, img, linear_color_stop, linear_gradient, list, px, rgb, rgba, svg,
+    Subscription, Window, div, img, linear_color_stop, linear_gradient, list,
+    prelude::FluentBuilder, px, rgb, rgba, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -22,6 +23,7 @@ use crate::lib::spotify::{
     LikedStatus, NativeSpotify, PlaybackSnapshot, PlaylistDetail, PlaylistPage, PlaylistSource,
 };
 use crate::view::components::artist_credits::artist_credits;
+use crate::view::components::track_title::track_title;
 
 const TRACK_OFFSET: usize = 3;
 const ALBUM_WIDTH: f32 = 160.0;
@@ -323,6 +325,21 @@ impl PlaylistScreen {
         cx.notify();
     }
 
+    fn is_album(&self) -> bool {
+        matches!(&self.source, PlaylistSource::TrackAlbum { .. })
+            || matches!(&self.source, PlaylistSource::Context { uri, .. } if uri.starts_with("spotify:album:"))
+    }
+
+    fn content_label(&self) -> &'static str {
+        if self.is_album() { "album" } else { "playlist" }
+    }
+
+    fn has_release_footer(&self) -> bool {
+        self.detail
+            .as_ref()
+            .is_some_and(|detail| detail.album.is_some())
+    }
+
     fn item_count(&self) -> usize {
         TRACK_OFFSET
             + self.visible_indices.len()
@@ -331,6 +348,7 @@ impl PlaylistScreen {
                     !detail.tracks.is_empty() && self.visible_indices.is_empty()
                 }),
             )
+            + usize::from(self.has_release_footer())
     }
 
     fn is_filtered(&self) -> bool {
@@ -436,6 +454,16 @@ impl PlaylistScreen {
         if detail.next_page_url.is_none() && detail.track_count.is_none() {
             detail.track_count = Some(new_len);
         }
+        if detail.album.is_some()
+            && detail.next_page_url.is_none()
+            && detail
+                .track_count
+                .is_none_or(|count| count == detail.tracks.len())
+            && detail.tracks.iter().all(|track| track.duration_ms > 0)
+        {
+            detail.total_duration_ms =
+                Some(detail.tracks.iter().map(|track| track.duration_ms).sum());
+        }
 
         if self.is_filtered() {
             let scroll_top = self.list_state.logical_scroll_top();
@@ -447,9 +475,15 @@ impl PlaylistScreen {
         } else {
             let added = new_len - old_len;
             if added > 0 {
+                if self.has_release_footer() {
+                    // Insert ahead of the footer and remeasure its new position.
+                    self.list_state
+                        .splice(old_item_count - 1..old_item_count, added + 1);
+                } else {
+                    self.list_state
+                        .splice(old_item_count..old_item_count, added);
+                }
                 self.visible_indices.extend(old_len..new_len);
-                self.list_state
-                    .splice(old_item_count..old_item_count, added);
             }
         }
         if let Some(detail) = self.detail.as_ref() {
@@ -534,7 +568,15 @@ impl PlaylistScreen {
     }
 
     fn cycle_sort(&mut self, cx: &mut Context<Self>) {
-        self.sort = self.sort.next();
+        self.sort = if self.is_album() {
+            if self.sort == PlaylistSort::Custom {
+                PlaylistSort::Title
+            } else {
+                PlaylistSort::Custom
+            }
+        } else {
+            self.sort.next()
+        };
         self.rebuild_visible();
         self.scroll_animation.cancel();
         self.list_state.reset(self.item_count());
@@ -557,7 +599,8 @@ impl PlaylistScreen {
         }
 
         if self.search_input.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search in playlist"));
+            let placeholder = format!("Search in {}", self.content_label());
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
             let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.search_query = input.read(cx).value().to_string();
@@ -587,9 +630,9 @@ impl PlaylistScreen {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let subtitle = if retry {
-            "Could not load playlist"
+            format!("Could not load {}", self.content_label())
         } else {
-            "Loading…"
+            "Loading…".to_string()
         };
         let body = div()
             .flex_1()
@@ -626,7 +669,7 @@ impl PlaylistScreen {
             .flex()
             .flex_col()
             .size_full()
-            .child(self.render_preview_header(header_height, cover_size, subtitle))
+            .child(self.render_preview_header(header_height, cover_size, &subtitle))
             .child(body)
             .into_any_element()
     }
@@ -635,21 +678,34 @@ impl PlaylistScreen {
         let Some(detail) = self.detail.as_ref() else {
             return self.render_preview_header(header_height, cover_size, "");
         };
-        let title_size = (header_height * 0.28).clamp(48.0, 96.0);
+        let title_size = if self.is_album() {
+            (header_height * 0.22).clamp(36.0, 72.0)
+        } else {
+            (header_height * 0.28).clamp(48.0, 96.0)
+        };
         let mut metadata = div()
             .flex()
             .items_center()
             .gap(px(6.0))
             .text_size(px(14.0))
             .text_color(rgb(0xffffff))
-            .child(self.render_owner_avatar(detail))
+            .when(detail.album.is_none(), |row| {
+                row.child(self.render_owner_avatar(detail))
+            })
             .child(
                 div()
-                    .max_w(px(240.0))
+                    .max_w(px(360.0))
                     .truncate()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .child(detail.owner_name.clone()),
+                    .child(if let Some(album) = &detail.album {
+                        artist_credits(&album.artist_credits, &detail.owner_name).into_any_element()
+                    } else {
+                        div().child(detail.owner_name.clone()).into_any_element()
+                    }),
             );
+        if let Some(year) = detail.album.as_ref().and_then(|album| album.release_year) {
+            metadata = metadata.child(bullet()).child(year.to_string());
+        }
         if let Some(track_count) = detail.track_count {
             metadata = metadata.child(bullet()).child(format!(
                 "{} {}",
@@ -658,9 +714,11 @@ impl PlaylistScreen {
             ));
         }
         if let Some(duration) = detail.total_duration_ms {
-            metadata = metadata
-                .child(bullet())
-                .child(format_total_duration(duration));
+            metadata = metadata.child(bullet()).child(if self.is_album() {
+                format_release_duration(duration)
+            } else {
+                format_total_duration(duration)
+            });
         }
 
         div()
@@ -693,14 +751,17 @@ impl PlaylistScreen {
                         div()
                             .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .child(self.source.kind_label()),
+                            .child(detail.album.as_ref().map_or_else(
+                                || self.source.kind_label().to_string(),
+                                |album| album.kind.clone(),
+                            )),
                     )
                     .child(
                         div()
                             .text_size(px(title_size))
                             .font_weight(gpui::FontWeight::BLACK)
                             .line_height(px(title_size * 0.9))
-                            .truncate()
+                            .when(!self.is_album(), |title| title.truncate())
                             .child(detail.name.clone()),
                     )
                     .child(metadata)
@@ -991,7 +1052,11 @@ impl PlaylistScreen {
                     .cursor_pointer()
                     .hover(|style| style.bg(rgba(0xffffff1a)))
                     .on_click(cx.listener(|this, _, _, cx| this.cycle_sort(cx)))
-                    .child(self.sort.label())
+                    .child(if self.is_album() && self.sort == PlaylistSort::Custom {
+                        "Release order"
+                    } else {
+                        self.sort.label()
+                    })
                     .child(
                         svg()
                             .path("icons/sort.svg")
@@ -1028,6 +1093,17 @@ impl PlaylistScreen {
             .flex_col()
             .gap(px(4.0))
             .bg(rgb(PANEL_BG))
+            .when(self.is_album(), |bar| {
+                let accent = self
+                    .detail
+                    .as_ref()
+                    .map_or(PANEL_BG, |detail| detail.accent);
+                bar.bg(linear_gradient(
+                    180.0,
+                    linear_color_stop(rgba((accent << 8) | 0x50), 0.0),
+                    linear_color_stop(rgb(PANEL_BG), 1.0),
+                ))
+            })
             .child(
                 div()
                     .h(px(48.0))
@@ -1067,11 +1143,15 @@ impl PlaylistScreen {
                     .gap(px(12.0))
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(div().w(px(40.0)).flex_shrink_0())
+                    .when(!self.is_album(), |row| {
+                        row.child(div().w(px(40.0)).flex_shrink_0())
+                    })
                     .child(div().flex_1().min_w(px(0.0)).child("Title")),
             )
-            .child(div().w(px(ALBUM_WIDTH)).child("Album"))
-            .child(div().w(px(DATE_WIDTH)).child("Date added"))
+            .when(!self.is_album(), |row| {
+                row.child(div().w(px(ALBUM_WIDTH)).child("Album"))
+                    .child(div().w(px(DATE_WIDTH)).child("Date added"))
+            })
             .child(div().w(px(LIKED_WIDTH)).flex_shrink_0())
             .child(
                 div().w(px(DURATION_WIDTH)).flex().justify_end().child(
@@ -1095,6 +1175,9 @@ impl PlaylistScreen {
             0 => self.render_header(header_height, cover_size),
             1 => self.render_action_bar(cx),
             2 => self.render_column_header(),
+            _ if self.has_release_footer() && index + 1 == self.item_count() => {
+                self.render_release_footer()
+            }
             _ => {
                 let track_index = self.visible_indices.get(index - TRACK_OFFSET).copied();
                 match track_index {
@@ -1103,6 +1186,35 @@ impl PlaylistScreen {
                 }
             }
         }
+    }
+
+    fn render_release_footer(&self) -> AnyElement {
+        let mut footer = div()
+            .w_full()
+            .px(px(24.0))
+            .pt(px(32.0))
+            .pb(px(40.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .text_size(px(12.0))
+            .text_color(rgb(0xb3b3b3));
+        if let Some(album) = self
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.album.as_ref())
+        {
+            if !album.release_date.is_empty() {
+                footer = footer.child(album.release_date.clone());
+            }
+            footer = footer.children(
+                album
+                    .copyrights
+                    .iter()
+                    .map(|text| div().child(text.clone())),
+            );
+        }
+        footer.into_any_element()
     }
 
     fn render_no_results(&self) -> AnyElement {
@@ -1114,7 +1226,10 @@ impl PlaylistScreen {
             .items_center()
             .text_size(px(14.0))
             .text_color(rgb(0xb3b3b3))
-            .child("No results found in this playlist.")
+            .child(format!(
+                "No results found in this {}.",
+                self.content_label()
+            ))
             .into_any_element()
     }
 
@@ -1189,7 +1304,11 @@ impl PlaylistScreen {
                     .text_size(px(15.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(title_color)
-                    .child(track.title.clone()),
+                    .child(track_title(
+                        &track.title,
+                        &track.uri,
+                        track.album_uri.as_deref(),
+                    )),
             )
             .children(track.explicit.then(|| {
                 div()
@@ -1286,12 +1405,14 @@ impl PlaylistScreen {
                     .gap(px(12.0))
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(render_cover(
-                        track.image_url.as_deref(),
-                        40.0,
-                        false,
-                        detail.accent,
-                    ))
+                    .when(!self.is_album(), |row| {
+                        row.child(render_cover(
+                            track.image_url.as_deref(),
+                            40.0,
+                            false,
+                            detail.accent,
+                        ))
+                    })
                     .child(
                         div()
                             .flex()
@@ -1307,27 +1428,29 @@ impl PlaylistScreen {
                             ),
                     ),
             )
-            .child(
-                div()
-                    .w(px(ALBUM_WIDTH))
-                    .truncate()
-                    .text_size(px(13.0))
-                    .text_color(rgb(0xb3b3b3))
-                    .child(track.album.clone()),
-            )
-            .child(
-                div()
-                    .w(px(DATE_WIDTH))
-                    .truncate()
-                    .text_size(px(13.0))
-                    .text_color(rgb(0xb3b3b3))
-                    .child(
-                        track
-                            .added_at_ms
-                            .map(format_relative_date)
-                            .unwrap_or_default(),
-                    ),
-            )
+            .when(!self.is_album(), |row| {
+                row.child(
+                    div()
+                        .w(px(ALBUM_WIDTH))
+                        .truncate()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0xb3b3b3))
+                        .child(track.album.clone()),
+                )
+                .child(
+                    div()
+                        .w(px(DATE_WIDTH))
+                        .truncate()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0xb3b3b3))
+                        .child(
+                            track
+                                .added_at_ms
+                                .map(format_relative_date)
+                                .unwrap_or_default(),
+                        ),
+                )
+            })
             .child(liked_cell)
             .child(
                 div()
@@ -1360,6 +1483,11 @@ impl PlaylistScreen {
             (
                 "You haven't liked any songs yet.",
                 "Songs you like will appear here.",
+            )
+        } else if self.is_album() {
+            (
+                "No songs are available for this release.",
+                "Try again later or choose another release.",
             )
         } else {
             (
@@ -1415,7 +1543,13 @@ impl Render for PlaylistScreen {
             .overflow_hidden();
 
         let content = if matches!(&self.state, LoadState::Loading) && self.detail.is_none() {
-            self.render_placeholder(header_height, cover_size, "Loading playlist…", false, cx)
+            self.render_placeholder(
+                header_height,
+                cover_size,
+                &format!("Loading {}…", self.content_label()),
+                false,
+                cx,
+            )
         } else if let LoadState::Error(error) = &self.state {
             self.render_placeholder(header_height, cover_size, error, true, cx)
         } else if self
@@ -1537,6 +1671,15 @@ fn format_total_duration(duration_ms: u64) -> String {
         format!("{hours} hr {minutes} min")
     } else {
         format!("{minutes} min")
+    }
+}
+
+fn format_release_duration(duration_ms: u64) -> String {
+    let seconds = duration_ms / 1000;
+    if seconds >= 3600 {
+        format_total_duration(duration_ms)
+    } else {
+        format!("{} min {} sec", seconds / 60, seconds % 60)
     }
 }
 
