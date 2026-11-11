@@ -16,10 +16,11 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
   idle Connect command channel closes before the session reports a disconnect. A revoked login
   still requires signing in again.
 - **Playlist detail**: saved playlists and Liked Songs open in a Spotify-style page with a large header, virtualized track list, local search, sort, context playback and per-row Like controls.
-- **Album navigation**: hover a song title to underline it; click to open its album, single or EP
-  without changing playback. Release pages reuse the virtualized detail view with native artwork,
-  artists, year, ordered songs and release information. Spec 016.
+- **Album navigation**: click a song title or choose **Go to album** from its context menu to open
+  its containing album, single or EP without changing playback. Titles underline on hover.
+  Release pages show native artwork, artists, year, ordered songs and release information. Spec 016.
 - **Like/unlike songs**: the now-playing bar and every playlist/context page show Spotify's plus/check control backed by the native collection service. Unliking from Liked Songs removes the row from the open list.
+- **Track context menu**: right-click songs in playlists, search, artist/Home cards or the player bar to add to an editable playlist, remove the exact playlist occurrence, like/unlike, queue, set a sleep timer, open radio/artist/album, view credits or copy a song link. Jam and taste-profile actions are visibly disabled.
 - **Artist profiles**: library and search artist results open a native artist page with a hero,
   popular tracks, discography filters, featuring/discovered-on/appears-on shelves, related artists,
   concerts, merch, an about panel, and metadata-only music-video cards. Spec 010.
@@ -55,11 +56,13 @@ A lightweight Spotify desktop client written in Rust with [GPUI](https://github.
 | Albums, singles and EPs | Native release-aware detail page and song-title navigation; offline checks pass, live/desktop checks pending |
 | Artist profiles | Implemented; read-only account probe passed, follow/unfollow and video playback unavailable |
 | Podcast library navigation | Native context track page; dedicated podcast layout not yet |
-| Queue, lyrics | Not yet |
+| Track context menu | Implemented; offline interaction checks pass, live service writes and desktop visual parity unverified |
+| Queue view, lyrics | Not yet |
 
 The library redesign is **not yet a complete 1:1 implementation**: playlist/folder creation,
-Jam, queue, other editing and drag organization remain disabled. Recents uses the native endpoint's
-latest 50 contexts; older ordering and pin ordering may differ from Spotify's local library index.
+Jam, library-level queue commands and drag organization remain disabled. Track-level queue
+append and playlist-item edits are available from the track menu. Recents uses the native
+endpoint's latest 50 contexts; older ordering and pin ordering may differ from Spotify's local library index.
 Pinning currently follows the installed desktop client's default four-item limit, not a claimed
 universal backend limit. Pin/unpin writes and exact visual parity still need validation. Some rich
 playlist labels (such as "Made for" / mixed playlists) remain unavailable. See
@@ -79,6 +82,14 @@ Like/unlike controls read membership from the native `collection` set once per s
 through `collection/v2/write`. Offline tests cover the request encoding, membership filtering and
 Liked Songs row removal. Account-mutating like/unlike validation and a live visual check are still
 pending and must be run explicitly. See [`specs/011-like-unlike-songs/`](specs/011-like-unlike-songs/).
+
+Track menus use native playlist edit capabilities, revisions and item IDs rather than owner-name
+guesses or URI-wide removal. Missing/ambiguous occurrence identity leaves removal unavailable.
+Queue append preserves local playback and rejects an inactive/full device instead of taking over
+another device. Sleep timers offer 5/10/15/30/45/60 minutes or end of track; replacement,
+cancellation and reconnect invalidate old timers. End of track retains the song paused at its
+beginning without consuming the queue. Playlist edits, radio and credits have offline/static
+evidence, not real-account validation. See [`specs/016-track-context-menu/`](specs/016-track-context-menu/).
 
 ## Requirements
 
@@ -161,6 +172,7 @@ src/
 │   ├── collection.rs           # native collection-v2 paging and explicit pin writes
 │   ├── search.rs               # Pathfinder persisted-query search
 │   ├── home.rs                 # native Home feed, shelf paging and Canvas metadata
+│   ├── track_actions.rs        # native playlist edits, song identity, credits and radio
 │   ├── store.rs                # device id + refresh token persistence
 │   └── error.rs                # unified error type
 ├── router/                     # path + stack navigation
@@ -210,7 +222,7 @@ client id, Pathfinder query hashes and which parts are confirmed versus inferred
 ## Roadmap
 
 - [x] Playlist detail view
-- [ ] Queue
+- [ ] Queue view
 - [x] Artist profiles
 - [ ] Album pages
 - [x] Liked Songs detail and playback

@@ -429,6 +429,44 @@ merch checkout stays external. For the diagnostics used during validation,
 `RSPOTIFY_ARTIST_DIAGNOSTICS` prints JSON paths/lengths only and `RSPOTIFY_ARTIST_PROBE_LIMIT`
 bounds how many saved artists the ignored smoke test walks.
 
+## Track context menu (spec 016)
+
+Offline analysis reused the installed Spotify ELF and V8 snapshot identities above. Selected
+`xpui-root-dialogs.js` has SHA-256
+`7791a6934b934839383a133afb8205b3dcede4c992bc3ca616ce05a07ba26570`.
+REA CLI static analysis evidence
+`ev_d1fa482bb52503ca54249aecdb683138d428435fd5934900a3b3625d4010fbaf`
+covers this selected inert member, not the complete client or runtime behavior. Native routing
+was inspected with GNU objdump; no native REA analysis engine or Spotify process was run.
+
+| Action | Static native evidence |
+| --- | --- |
+| Credits | Dialog source requests `/track-credits-view/v0/experimental/{base62TrackId}/credits`; renders `trackTitle`, `roleCredits`/`extendedCredits` role titles and contributor names, and `sourceNames` |
+| Radio | Shipped action consumes `body.mediaItems[0].uri`; librespot supplies GET `/inspiredby-mix/v2/seed_to_playlist/{track-uri}?response-format=json` |
+| Playlist items | Native request builder `0x2bdb990` constructs `playlist/v2/…`; operation 1 at `0x2bdba24` appends `/changes`, `0x2bdbbd0` selects POST, and sender `0x2bdf78a` serializes the protobuf body |
+
+The installed ELF contains the `ListChanges` descriptor at file offset 9,311,771, matching
+librespot's playlist4 schema. rspotify sends `ListChanges.base_revision`, ADD with `add_last`,
+or a one-item positional REM after checking the current revision, edit capability, exact item ID,
+URI and absolute position. It requests resulting/sync revisions and requires one nonempty,
+non-resync resulting revision before reporting success. Account-specific caches are invalidated
+and stale pre-edit detail writes are rejected. Native context UID matching accepts exact hex item
+IDs only; missing/ambiguous identities never fall back to URI-wide removal.
+
+**Evidence limit:** full request-specific optional nonce/base-version policy was not recovered
+from the stripped native caller. The implementation leaves those optional fields unset; this is
+source-schema-based construction, not a captured successful account mutation. Playlist metadata
+outside the returned native item window cannot safely supply a removal identity. Live playlist
+edits, credits and radio responses were not exercised in this task.
+
+Queue append exposes the existing vendored Connect `add_to_queue` transition through an
+acknowledged local command, preserving current playback and queued-before-context ordering.
+Inactive/full local queues fail visibly without activation or dropping existing queued entries.
+The shared sleep timer is local: superseded deadlines are aborted/generation-checked; end-of-track
+is intercepted inside Spirc before repeat/advance, retaining the current song paused at its start.
+Reconnect cancels timers. Jam and taste-profile entries remain visibly disabled by agreement;
+no guessed service calls or public Web API substitutes are used.
+
 ## What is observed vs. inferred
 
 Confirmed directly from the artifact:

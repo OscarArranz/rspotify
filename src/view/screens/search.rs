@@ -13,6 +13,7 @@ use crate::state::AppState;
 use crate::view::components::smooth_scroll::{
     SmoothScrollElement, SmoothScrollState, list_scroll_overlay, nested_scroll_region,
 };
+use crate::view::components::track_menu::{TrackMenuTarget, track_menu};
 use crate::view::components::track_title::{open_album, track_title};
 use crate::view::screens::artist::{ArtistScreen, ArtistSource};
 
@@ -190,7 +191,7 @@ fn track_row(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl In
     let client = client.clone();
     let uri = item.uri.clone();
     let is_song = matches!(item.kind, "Song" | "Episode");
-    div()
+    let row = div()
         .id(("search-track", index))
         .flex()
         .items_center()
@@ -227,7 +228,13 @@ fn track_row(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl In
                 .text_sm()
                 .text_color(rgb(0xb3b3b3))
                 .child(item.duration_ms.map(format_duration).unwrap_or_default()),
-        )
+        );
+    track_menu(
+        row,
+        format!("search-track-menu-{index}"),
+        TrackMenuTarget::new(item.uri.clone(), item.title.clone()),
+        None,
+    )
 }
 
 fn album_card(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl IntoElement {
@@ -433,7 +440,7 @@ fn top_result_card(item: &SearchItem, client: &NativeSpotify) -> AnyElement {
     let album_play_client = client.clone();
     let album_play_uri = item.uri.clone();
     let client = client.clone();
-    div()
+    let card = div()
         .id("top-result-card")
         .flex()
         .items_center()
@@ -493,8 +500,13 @@ fn top_result_card(item: &SearchItem, client: &NativeSpotify) -> AnyElement {
                         .size(px(18.0))
                         .text_color(rgb(0x000000)),
                 ),
-        )
-        .into_any_element()
+        );
+    track_menu(
+        card,
+        "search-top-track-menu",
+        TrackMenuTarget::new(item.uri.clone(), item.title.clone()),
+        None,
+    )
 }
 
 impl Render for SearchScreen {

@@ -16,6 +16,7 @@ use crate::lib::spotify::NativeSpotify;
 use crate::router::{PathRouter, PathRouterHandle, Route};
 use crate::state::AppState;
 use crate::view::components::titlebar::Titlebar;
+use crate::view::components::track_menu::{self, TrackMenuHost};
 use crate::view::main_layout::MainLayout;
 use crate::view::screens::sign_in::SignInScreen;
 
@@ -23,10 +24,12 @@ use crate::view::screens::sign_in::SignInScreen;
 pub struct RootLayout {
     router: Entity<PathRouter>,
     titlebar: Entity<Titlebar>,
+    track_menu: Entity<TrackMenuHost>,
 }
 
 impl RootLayout {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let track_menu = track_menu::init(cx);
         let restoring = NativeSpotify::has_restorable_session();
         if restoring && let Some(profile) = NativeSpotify::cached_profile() {
             cx.update_global::<AppState, _>(|state, _| state.set_profile(profile));
@@ -122,6 +125,7 @@ impl RootLayout {
         Self {
             router,
             titlebar: cx.new(|cx| Titlebar::new(window, cx)),
+            track_menu,
         }
     }
 }
@@ -129,6 +133,7 @@ impl RootLayout {
 impl Render for RootLayout {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -141,5 +146,6 @@ impl Render for RootLayout {
             ))
             // Main content area below titlebar
             .child(div().flex_1().overflow_hidden().child(self.router.clone()))
+            .child(self.track_menu.clone())
     }
 }

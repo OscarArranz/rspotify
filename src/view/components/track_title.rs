@@ -44,17 +44,25 @@ pub(crate) fn track_title(
                     if let Some(uri) = album_uri.as_deref() {
                         open_album(uri, cx);
                     } else {
-                        open_source(
-                            PlaylistSource::TrackAlbum {
-                                track_uri: track_uri.clone(),
-                            },
-                            format!("album-for:{track_uri}"),
-                            cx,
-                        );
+                        open_track_album(&track_uri, cx);
                     }
                 }),
         )
         .into_any_element()
+}
+
+/// Open a song's containing album, single or EP using native metadata on the destination worker.
+pub(crate) fn open_track_album(track_uri: &str, cx: &mut App) {
+    if !canonical_uri(track_uri, "spotify:track:") {
+        return;
+    }
+    open_source(
+        PlaylistSource::TrackAlbum {
+            track_uri: track_uri.to_string(),
+        },
+        format!("album-for:{track_uri}"),
+        cx,
+    );
 }
 
 /// Navigate to an album without starting or interrupting playback.

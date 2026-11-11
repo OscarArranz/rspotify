@@ -33,6 +33,12 @@ The border is painted independently of text shaping and does not change hover-ti
 Apply this component in the now-playing bar, shared detail rows, search song rows/top result,
 artist track rows, and Home song card titles. Parent row/card/play-control handlers remain.
 
+The track context menu's “Go to album” command calls the same `open_track_album` helper
+as a title with unknown album identity. It pushes the release-loading route immediately;
+native resolution stays in the destination worker. The menu does not prefetch a second
+copy of track/album metadata or label every destination as a full album.
+
+
 ## Shared screen
 
 `PlaylistScreen` remains the owner of loading/error/retry, playback polling, Like state,

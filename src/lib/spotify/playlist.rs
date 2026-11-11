@@ -4,6 +4,7 @@
 //! Track metadata and pagination come from the native context-resolve endpoint
 //! (`SpClient::get_context` / `get_next_page`) and extended metadata.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -24,6 +25,7 @@ use serde_json::Value;
 
 use super::client::ArtistCredit;
 use super::error::SpotifyError;
+use super::track_actions::{self, PlaylistOccurrence};
 
 const FALLBACK_ACCENT: u32 = 0x5c44c7;
 const LIKED_ACCENT: u32 = 0x4b1fd0;
@@ -104,6 +106,10 @@ pub struct PlaylistDetail {
     #[serde(default)]
     pub album: Option<AlbumMetadata>,
     pub(crate) added_at: HashMap<String, i64>,
+    #[serde(default)]
+    pub(crate) occurrences: Vec<PlaylistOccurrence>,
+    #[serde(default)]
+    pub(crate) revision: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -130,6 +136,10 @@ pub struct PlaylistTrack {
     pub added_at_ms: Option<i64>,
     pub explicit: bool,
     pub playable: bool,
+    #[serde(default)]
+    pub occurrence: Option<PlaylistOccurrence>,
+    #[serde(default)]
+    pub(crate) context_uid: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -258,6 +268,17 @@ pub fn write_cached_detail(account: &str, source: &PlaylistSource, detail: &Play
             let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
         }
         let _ = fs::rename(tmp, path);
+    }
+}
+
+/// Worker-only invalidation before a revision-checked edit. Failure prevents the write.
+pub(crate) fn invalidate_cached_detail(account: &str, uri: &str) -> Result<(), SpotifyError> {
+    match fs::remove_file(detail_cache_path_for_identity(account, uri)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(SpotifyError::Storage(format!(
+            "Cannot invalidate edited playlist: {error}"
+        ))),
     }
 }
 
@@ -544,9 +565,9 @@ async fn fetch_saved_playlist(
 ) -> Result<PlaylistDetail, SpotifyError> {
     let parsed = SpotifyUri::from_uri(&uri)
         .map_err(|error| SpotifyError::Api(format!("playlist URI: {error}")))?;
-    let playlist = Playlist::get(session, &parsed)
-        .await
-        .map_err(|error| SpotifyError::Api(error.to_string()))?;
+    let content = track_actions::playlist_content(session, &uri).await?;
+    let playlist =
+        Playlist::parse(&content, &parsed).map_err(|error| SpotifyError::Api(error.to_string()))?;
 
     let owner_username = match &playlist.id {
         SpotifyUri::Playlist {
@@ -573,7 +594,9 @@ async fn fetch_saved_playlist(
         .map_err(|error| SpotifyError::Api(error.to_string()))?;
 
     let added_at = added_at_by_uri(&playlist);
+    let occurrences = track_actions::occurrences(&uri, &content);
     let (mut tracks, next_page_url) = context_tracks(&context, &added_at);
+    attach_occurrences(&mut tracks, &occurrences);
     hydrate_tracks(session, &mut tracks).await;
     let name = non_empty(&playlist.attributes.name)
         .map(ToOwned::to_owned)
@@ -603,6 +626,8 @@ async fn fetch_saved_playlist(
         next_page_url,
         album: None,
         added_at,
+        occurrences,
+        revision: content.revision().to_vec(),
     })
 }
 
@@ -636,6 +661,8 @@ async fn fetch_liked_songs(session: &Session) -> Result<PlaylistDetail, SpotifyE
         next_page_url,
         album: None,
         added_at: HashMap::new(),
+        occurrences: Vec::new(),
+        revision: Vec::new(),
     })
 }
 
@@ -729,6 +756,8 @@ fn track_from_metadata(
         added_at_ms,
         explicit,
         playable,
+        occurrence: None,
+        context_uid: None,
     }
 }
 
@@ -738,7 +767,44 @@ fn track_from_context(track: &ContextTrack, added_at: &HashMap<String, i64>) -> 
     let added_at_ms = added_at.get(&uri).copied().or_else(|| {
         metadata_value(metadata, &["added_at"]).and_then(|value| parse_timestamp_ms(&value))
     });
-    track_from_metadata(&uri, metadata, added_at_ms)
+    let mut result = track_from_metadata(&uri, metadata, added_at_ms);
+    result.context_uid = track.uid.clone();
+    result
+}
+
+pub(crate) fn attach_occurrences(tracks: &mut [PlaylistTrack], items: &[PlaylistOccurrence]) {
+    let mut by_uid: HashMap<String, Option<&PlaylistOccurrence>> =
+        HashMap::with_capacity(items.len());
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for item in items {
+        if item.item_id.is_empty() {
+            continue;
+        }
+        let mut uid = String::with_capacity(item.item_id.len() * 2);
+        for byte in &item.item_id {
+            uid.push(HEX[usize::from(byte >> 4)] as char);
+            uid.push(HEX[usize::from(byte & 15)] as char);
+        }
+        by_uid
+            .entry(uid)
+            .and_modify(|item| *item = None)
+            .or_insert(Some(item));
+    }
+    for track in tracks {
+        track.occurrence = track
+            .context_uid
+            .as_deref()
+            .and_then(|uid| {
+                let uid = if uid.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                    Cow::Owned(uid.to_ascii_lowercase())
+                } else {
+                    Cow::Borrowed(uid)
+                };
+                by_uid.get::<str>(uid.as_ref()).copied().flatten()
+            })
+            .filter(|item| item.track_uri == track.uri)
+            .cloned();
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1018,7 +1084,9 @@ fn parse_json_page(value: &Value) -> PlaylistPage {
             let added_at_ms = metadata
                 .get("added_at")
                 .and_then(|value| parse_timestamp_ms(value));
-            tracks.push(track_from_metadata(uri, &metadata, added_at_ms));
+            let mut track = track_from_metadata(uri, &metadata, added_at_ms);
+            track.context_uid = item.get("uid").and_then(Value::as_str).map(str::to_owned);
+            tracks.push(track);
         }
     }
 
@@ -1264,6 +1332,82 @@ fn html_to_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_page_matches_duplicate_occurrences_by_uid_only() {
+        let mut page = parse_json_page(&serde_json::json!({
+            "tracks": [
+                {"uri": "spotify:track:same", "uid": "02"},
+                {"uri": "spotify:track:same", "uid": "01"},
+                {"uri": "spotify:track:same"}
+            ]
+        }));
+        let items: Vec<_> = [1, 2]
+            .into_iter()
+            .map(|id| PlaylistOccurrence {
+                playlist_uri: "spotify:playlist:source".into(),
+                track_uri: "spotify:track:same".into(),
+                item_id: vec![id],
+                revision: vec![7],
+                position: i32::from(id) - 1,
+            })
+            .collect();
+        attach_occurrences(&mut page.tracks, &items);
+        assert_eq!(page.tracks[0].occurrence.as_ref().unwrap().item_id, vec![2]);
+        assert_eq!(page.tracks[1].occurrence.as_ref().unwrap().item_id, vec![1]);
+        assert!(page.tracks[2].occurrence.is_none());
+    }
+
+    #[test]
+    fn ambiguous_ids_are_rejected_and_hex_uid_case_is_ignored() {
+        let mut tracks = vec![
+            PlaylistTrack {
+                uri: "spotify:track:song".into(),
+                context_uid: Some("0A".into()),
+                ..Default::default()
+            },
+            PlaylistTrack {
+                uri: "spotify:track:song".into(),
+                context_uid: Some("0b".into()),
+                ..Default::default()
+            },
+        ];
+        let occurrence = |id| PlaylistOccurrence {
+            playlist_uri: "spotify:playlist:source".into(),
+            track_uri: "spotify:track:song".into(),
+            item_id: vec![id],
+            revision: vec![1],
+            position: 0,
+        };
+        attach_occurrences(
+            &mut tracks,
+            &[occurrence(10), occurrence(11), occurrence(11)],
+        );
+        assert_eq!(tracks[0].occurrence.as_ref().unwrap().item_id, vec![10]);
+        assert!(tracks[1].occurrence.is_none());
+    }
+
+    #[test]
+    fn playlist_edit_invalidation_removes_persisted_detail() {
+        let source = PlaylistSource::Playlist {
+            uri: "spotify:playlist:edit-invalidation-test".into(),
+            name: String::new(),
+            owner: String::new(),
+            image_url: None,
+        };
+        write_cached_detail(
+            "edit-invalidation-account",
+            &source,
+            &PlaylistDetail::default(),
+        );
+        assert!(read_cached_detail("edit-invalidation-account", &source).is_some());
+        invalidate_cached_detail(
+            "edit-invalidation-account",
+            "spotify:playlist:edit-invalidation-test",
+        )
+        .unwrap();
+        assert!(read_cached_detail("edit-invalidation-account", &source).is_none());
+    }
 
     #[test]
     fn cached_detail_round_trips_and_corrupt_data_is_ignored() {

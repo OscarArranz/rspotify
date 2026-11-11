@@ -17,6 +17,7 @@ mod playlist;
 mod search;
 mod sleep_inhibitor;
 mod store;
+mod track_actions;
 
 pub use artist::{
     ArtistCard, ArtistCardKind, ArtistConcert, ArtistMerch, ArtistProfile, ArtistTrack, ArtistVideo,
@@ -27,3 +28,4 @@ pub use client::{
 pub use error::SpotifyError;
 pub use playlist::{PlaylistDetail, PlaylistPage, PlaylistSource};
 pub use search::{SearchItem, SearchResults};
+pub use track_actions::{PlaylistOccurrence, SleepTimerChoice, TrackCredits};

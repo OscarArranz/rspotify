@@ -411,6 +411,26 @@ impl<'ct> ConnectState {
         Ok(())
     }
 
+    /// Local UI enqueue must not silently disappear on an inactive or full device.
+    pub(crate) fn enqueue_track(&mut self, track: ProvidedTrack) -> Result<(), Error> {
+        if !self.is_active() {
+            return Err(Error::failed_precondition(
+                "Start playback in rspotify before adding to its queue",
+            ));
+        }
+        if self
+            .next_tracks()
+            .iter()
+            .filter(|track| track.is_queue())
+            .count()
+            >= SPOTIFY_MAX_NEXT_TRACKS_SIZE
+        {
+            return Err(Error::resource_exhausted("The playback queue is full"));
+        }
+        self.add_to_queue(track, true);
+        Ok(())
+    }
+
     pub fn add_to_queue(&mut self, mut track: ProvidedTrack, rev_update: bool) {
         track.uid = format!("q{}", self.queue_count);
         self.queue_count += 1;
@@ -435,5 +455,75 @@ impl<'ct> ConnectState {
             self.update_queue_revision();
         }
         self.update_restrictions();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{Session, SessionConfig};
+    use crate::state::ConnectConfig;
+
+    fn track(uri: &str, provider: Provider) -> ProvidedTrack {
+        ProvidedTrack {
+            uri: uri.into(),
+            provider: provider.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn local_enqueue_preserves_playback_and_precedes_context_after_existing_queue() {
+        let session = Session::new(SessionConfig::default(), None);
+        let mut state = ConnectState::new(ConnectConfig::default(), &session);
+        state.set_active(true);
+        state.player_mut().track = MessageField::some(track("current", Provider::Context));
+        state.player_mut().prev_tracks = vec![track("previous", Provider::Context)];
+        state.player_mut().next_tracks = vec![
+            track("already-queued", Provider::Queue),
+            track("context-next", Provider::Context),
+            track("context-later", Provider::Context),
+        ];
+
+        state
+            .enqueue_track(track("new", Provider::Context))
+            .unwrap();
+
+        assert_eq!(state.player().track.uri, "current");
+        assert_eq!(state.player().prev_tracks[0].uri, "previous");
+        assert_eq!(
+            state
+                .next_tracks()
+                .iter()
+                .map(|track| track.uri.as_str())
+                .collect::<Vec<_>>(),
+            ["already-queued", "new", "context-next", "context-later"]
+        );
+        assert!(state.next_tracks()[1].is_queue());
+        assert!(state.next_tracks()[1].is_from_queue());
+    }
+
+    #[tokio::test]
+    async fn local_enqueue_rejects_inactive_and_full_queue_without_losing_items() {
+        let session = Session::new(SessionConfig::default(), None);
+        let mut state = ConnectState::new(ConnectConfig::default(), &session);
+        assert!(
+            state
+                .enqueue_track(track("new", Provider::Context))
+                .is_err()
+        );
+        assert!(state.next_tracks().is_empty());
+
+        state.set_active(true);
+        state.player_mut().next_tracks = (0..SPOTIFY_MAX_NEXT_TRACKS_SIZE)
+            .map(|index| track(&format!("queued-{index}"), Provider::Queue))
+            .collect();
+        let before = state.next_tracks().clone();
+        assert!(
+            state
+                .enqueue_track(track("new", Provider::Context))
+                .is_err()
+        );
+        assert_eq!(state.next_tracks(), &before);
     }
 }

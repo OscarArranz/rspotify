@@ -23,6 +23,7 @@ use crate::lib::spotify::{
     LikedStatus, NativeSpotify, PlaybackSnapshot, PlaylistDetail, PlaylistPage, PlaylistSource,
 };
 use crate::view::components::artist_credits::artist_credits;
+use crate::view::components::track_menu::{TrackMenuTarget, track_menu};
 use crate::view::components::track_title::track_title;
 
 const TRACK_OFFSET: usize = 3;
@@ -1462,11 +1463,18 @@ impl PlaylistScreen {
                     .child(format_track_duration(track.duration_ms)),
             );
 
-        if playable {
-            row.into_any_element()
-        } else {
-            row.opacity(0.55).into_any_element()
-        }
+        let row = if playable { row } else { row.opacity(0.55) };
+        let mut target = TrackMenuTarget::new(track.uri.clone(), track.title.clone());
+        target.occurrence = track.occurrence.clone();
+        let weak = cx.entity().downgrade();
+        track_menu(
+            row,
+            format!("playlist-track-menu-{}-{track_index}", detail.context_uri),
+            target,
+            Some(std::rc::Rc::new(move |cx| {
+                let _ = weak.update(cx, |this, cx| this.start_load(cx));
+            })),
+        )
     }
 
     fn render_empty_page(

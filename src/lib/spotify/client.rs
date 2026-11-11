@@ -2,7 +2,7 @@
 //! Spotify Connect playback.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::Path,
     sync::{
         Arc, Mutex, RwLock, Weak,
@@ -30,6 +30,31 @@ use super::playlist::{self, PlaylistDetail, PlaylistPage, PlaylistSource};
 use super::search::{self, SearchResults};
 use super::sleep_inhibitor::SleepInhibitor;
 use super::store::{SessionStore, StoredProfile};
+use super::track_actions::{
+    self, EditablePlaylist, PlaylistOccurrence, SleepTimerChoice, TrackCredits, TrackMenuInfo,
+};
+
+#[derive(Default)]
+struct SleepTimerState {
+    choice: SleepTimerChoice,
+    generation: u64,
+    task: Option<tokio::task::AbortHandle>,
+}
+
+impl SleepTimerState {
+    fn replace(&mut self, choice: SleepTimerChoice) -> u64 {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.choice = choice;
+        self.generation
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation && matches!(self.choice, SleepTimerChoice::Minutes(_))
+    }
+}
 
 /// Spotify's own desktop client id. The same id is used by librespot for keymaster
 /// requests and is allowed to use the loopback OAuth redirect below.
@@ -281,6 +306,10 @@ struct NativeInner {
     username: String,
     liked_songs_detail: Mutex<Option<PlaylistDetail>>,
     liked: Arc<Mutex<LikedCache>>,
+    sleep_timer: Mutex<SleepTimerState>,
+    playlist_pages: Mutex<HashMap<String, (String, Arc<Vec<PlaylistOccurrence>>)>>,
+    /// Serializes edits/cache writes and rejects stale detail writes after an edit.
+    playlist_cache_revisions: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 /// One established librespot session. `alive` stops polling tasks that belong to a dead session.
@@ -484,6 +513,9 @@ impl NativeSpotify {
                 username,
                 liked_songs_detail: Mutex::new(liked_songs_detail),
                 liked: Arc::new(Mutex::new(LikedCache::default())),
+                sleep_timer: Mutex::new(SleepTimerState::default()),
+                playlist_pages: Mutex::new(HashMap::new()),
+                playlist_cache_revisions: Mutex::new(HashMap::new()),
             }),
         };
         spawn_session_supervisor(&client, opened.spirc_task);
@@ -844,9 +876,24 @@ impl NativeSpotify {
     /// Fetches a saved playlist, or the current user's Liked Songs, plus its first context page.
     pub fn playlist_detail(&self, source: PlaylistSource) -> Result<PlaylistDetail, SpotifyError> {
         let session = self.connection_blocking()?.session;
-        self.inner
+        let mut revisions = self.inner.playlist_cache_revisions.lock().unwrap();
+        let detail = self
+            .inner
             .runtime
-            .block_on(playlist::fetch_playlist_detail(&session, source))
+            .block_on(playlist::fetch_playlist_detail(&session, source))?;
+        if !detail.revision.is_empty() {
+            revisions.insert(detail.context_uri.clone(), detail.revision.clone());
+        }
+        if let Some(url) = &detail.next_page_url {
+            self.inner.playlist_pages.lock().unwrap().insert(
+                url.clone(),
+                (
+                    detail.context_uri.clone(),
+                    Arc::new(detail.occurrences.clone()),
+                ),
+            );
+        }
+        Ok(detail)
     }
 
     /// Fetches an artist's profile overview.
@@ -866,6 +913,13 @@ impl NativeSpotify {
     }
 
     pub fn cache_playlist_detail(&self, source: &PlaylistSource, detail: &PlaylistDetail) {
+        let revisions = self.inner.playlist_cache_revisions.lock().unwrap();
+        if revisions
+            .get(&detail.context_uri)
+            .is_some_and(|revision| revision.is_empty() || *revision != detail.revision)
+        {
+            return;
+        }
         if matches!(source, PlaylistSource::LikedSongs) {
             *self.inner.liked_songs_detail.lock().unwrap() = Some(detail.clone());
         }
@@ -880,9 +934,28 @@ impl NativeSpotify {
     /// Fetches one additional context page for an already-loaded playlist.
     pub fn playlist_next_page(&self, next_page_url: &str) -> Result<PlaylistPage, SpotifyError> {
         let session = self.connection_blocking()?.session;
-        self.inner
+        let mut page = self
+            .inner
             .runtime
-            .block_on(playlist::fetch_playlist_page(&session, next_page_url))
+            .block_on(playlist::fetch_playlist_page(&session, next_page_url))?;
+        let source = self
+            .inner
+            .playlist_pages
+            .lock()
+            .unwrap()
+            .get(next_page_url)
+            .cloned();
+        if let Some((uri, occurrences)) = source {
+            playlist::attach_occurrences(&mut page.tracks, &occurrences);
+            if let Some(url) = &page.next_page_url {
+                self.inner
+                    .playlist_pages
+                    .lock()
+                    .unwrap()
+                    .insert(url.clone(), (uri, occurrences));
+            }
+        }
+        Ok(page)
     }
 
     /// The native context URI for the current user's Liked Songs.
@@ -990,6 +1063,158 @@ impl NativeSpotify {
         self.with_spirc(Spirc::pause)
     }
 
+    /// Worker-only: acknowledge an append through the existing local Connect queue.
+    pub fn add_to_queue(&self, uri: &str) -> Result<(), SpotifyError> {
+        let connection = self.connection_blocking()?;
+        self.inner
+            .runtime
+            .block_on(connection.spirc.add_to_queue(uri.to_owned()))
+            .map_err(|error| SpotifyError::Playback(error.to_string()))
+    }
+
+    pub fn track_menu_info(&self, uri: &str) -> Result<TrackMenuInfo, SpotifyError> {
+        let session = self.connection_blocking()?.session;
+        self.inner
+            .runtime
+            .block_on(track_actions::menu_info(&session, uri))
+    }
+
+    pub fn track_credits(&self, uri: &str) -> Result<TrackCredits, SpotifyError> {
+        let session = self.connection_blocking()?.session;
+        self.inner
+            .runtime
+            .block_on(track_actions::credits(&session, uri))
+    }
+
+    pub fn track_radio(&self, uri: &str) -> Result<PlaylistSource, SpotifyError> {
+        let session = self.connection_blocking()?.session;
+        self.inner
+            .runtime
+            .block_on(track_actions::radio(&session, uri))
+    }
+
+    /// Uses native item capabilities, including collaborative playlists; never owner-name guesses.
+    pub fn editable_playlists(&self) -> Result<Vec<EditablePlaylist>, SpotifyError> {
+        let entries = self.library_playlists()?;
+        let session = self.connection_blocking()?.session;
+        self.inner.runtime.block_on(async {
+            let mut result = Vec::new();
+            for entry in entries {
+                let Some(content) = track_actions::editable_content(&session, &entry.uri).await?
+                else {
+                    continue;
+                };
+                if content
+                    .capabilities
+                    .as_ref()
+                    .is_some_and(|capabilities| capabilities.can_edit_items())
+                {
+                    result.push(EditablePlaylist {
+                        uri: entry.uri,
+                        name: content
+                            .attributes
+                            .as_ref()
+                            .map(|attributes| attributes.name())
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or(&entry.name)
+                            .to_owned(),
+                    });
+                }
+            }
+            Ok(result)
+        })
+    }
+
+    pub fn add_track_to_playlist(
+        &self,
+        playlist_uri: &str,
+        track_uri: &str,
+    ) -> Result<(), SpotifyError> {
+        let session = self.connection_blocking()?.session;
+        let mut revisions = self.inner.playlist_cache_revisions.lock().unwrap();
+        self.inner.runtime.block_on(async {
+            let content = track_actions::playlist_content(&session, playlist_uri).await?;
+            let changes = track_actions::append_changes(&content, track_uri)?;
+            playlist::invalidate_cached_detail(&self.inner.username, playlist_uri)?;
+            revisions.insert(playlist_uri.to_owned(), Vec::new());
+            let revision = track_actions::apply_changes(&session, playlist_uri, &changes).await?;
+            revisions.insert(playlist_uri.to_owned(), revision);
+            Ok(())
+        })
+    }
+
+    pub fn remove_playlist_occurrence(
+        &self,
+        occurrence: &PlaylistOccurrence,
+    ) -> Result<(), SpotifyError> {
+        let session = self.connection_blocking()?.session;
+        let mut revisions = self.inner.playlist_cache_revisions.lock().unwrap();
+        self.inner.runtime.block_on(async {
+            let content =
+                track_actions::playlist_content(&session, &occurrence.playlist_uri).await?;
+            let changes = track_actions::removal_changes(&content, occurrence)?;
+            playlist::invalidate_cached_detail(&self.inner.username, &occurrence.playlist_uri)?;
+            revisions.insert(occurrence.playlist_uri.clone(), Vec::new());
+            let revision =
+                track_actions::apply_changes(&session, &occurrence.playlist_uri, &changes).await?;
+            revisions.insert(occurrence.playlist_uri.clone(), revision);
+            Ok(())
+        })
+    }
+
+    /// Local-only; replacement and expiry serialize under the same cancellation lock.
+    pub fn set_sleep_timer(&self, choice: SleepTimerChoice) -> Result<(), SpotifyError> {
+        if matches!(choice, SleepTimerChoice::Minutes(minutes) if !matches!(minutes, 5 | 10 | 15 | 30 | 45 | 60))
+        {
+            return Err(SpotifyError::Playback(
+                "Unsupported sleep timer duration".into(),
+            ));
+        }
+        let mut state = self.inner.sleep_timer.lock().unwrap();
+        if let Some(connection) = self.inner.live_connection() {
+            connection
+                .spirc
+                .set_pause_at_end_of_track(choice == SleepTimerChoice::EndOfTrack)
+                .map_err(|error| SpotifyError::Playback(error.to_string()))?;
+        } else if choice != SleepTimerChoice::Off {
+            return Err(SpotifyError::Reconnecting);
+        }
+        let generation = state.replace(choice);
+        if let SleepTimerChoice::Minutes(minutes) = choice {
+            let weak = Arc::downgrade(&self.inner);
+            let task = self.inner.runtime.spawn(async move {
+                tokio::time::sleep(Duration::from_secs(u64::from(minutes) * 60)).await;
+                let Some(inner) = weak.upgrade() else { return };
+                let mut state = inner.sleep_timer.lock().unwrap();
+                if !state.is_current(generation) {
+                    return;
+                }
+                if let Some(connection) = inner.live_connection() {
+                    if let Err(error) = connection.spirc.pause() {
+                        eprintln!("Sleep timer could not pause playback: {error}");
+                    }
+                }
+                state.choice = SleepTimerChoice::Off;
+                state.task = None;
+            });
+            state.task = Some(task.abort_handle());
+        }
+        Ok(())
+    }
+
+    pub fn sleep_timer(&self) -> SleepTimerChoice {
+        let mut state = self.inner.sleep_timer.lock().unwrap();
+        if state.choice == SleepTimerChoice::EndOfTrack
+            && !self
+                .inner
+                .live_connection()
+                .is_some_and(|connection| connection.spirc.pause_at_end_of_track())
+        {
+            state.replace(SleepTimerChoice::Off);
+        }
+        state.choice
+    }
+
     pub fn next(&self) -> Result<(), SpotifyError> {
         self.with_spirc(Spirc::next)
     }
@@ -1062,6 +1287,12 @@ impl NativeInner {
 
     /// Drops the current connection and freezes playback before a rebuild.
     fn detach_connection(&self) -> Option<ResumeTarget> {
+        // A timer belongs to this connection. Explicit cancellation prevents a stale deadline
+        // from pausing a newly connected session or displaying an unarmed end-of-track timer.
+        self.sleep_timer
+            .lock()
+            .unwrap()
+            .replace(SleepTimerChoice::Off);
         let resume = freeze_for_reconnect(&self.playback);
         if let Some(connection) = self.connection.write().unwrap().take() {
             connection.alive.store(false, Ordering::Relaxed);
@@ -1689,6 +1920,33 @@ fn restrict_private_dir(_path: &std::path::Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sleep_timer_replacement_and_cancellation_reject_stale_expiry() {
+        let mut state = SleepTimerState::default();
+        let first = state.replace(SleepTimerChoice::Minutes(5));
+        assert!(state.is_current(first));
+        let second = state.replace(SleepTimerChoice::Minutes(10));
+        assert!(!state.is_current(first));
+        assert!(state.is_current(second));
+        state.replace(SleepTimerChoice::Off);
+        assert!(!state.is_current(second));
+        let third = state.replace(SleepTimerChoice::Minutes(15));
+        state.replace(SleepTimerChoice::EndOfTrack);
+        assert!(!state.is_current(third));
+    }
+
+    #[test]
+    fn replacing_timer_aborts_its_pending_deadline() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let task = runtime.spawn(std::future::pending::<()>());
+        let mut state = SleepTimerState::default();
+        state.task = Some(task.abort_handle());
+        state.replace(SleepTimerChoice::Off);
+        assert!(runtime.block_on(task).unwrap_err().is_cancelled());
+    }
 
     const TEST_TRACK_URI: &str = "spotify:track:0000000000000000000000";
 

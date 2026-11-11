@@ -23,6 +23,7 @@ use crate::router::StackRouterHandle;
 use crate::view::components::smooth_scroll::{
     SmoothScrollState, list_scroll_overlay, nested_scroll_region,
 };
+use crate::view::components::track_menu::{TrackMenuTarget, track_menu};
 use crate::view::components::track_title::track_title;
 use crate::view::components::virtual_list::virtual_horizontal_list;
 use crate::view::screens::playlist::PlaylistScreen;
@@ -571,7 +572,7 @@ impl ArtistScreen {
         let explicit = track.explicit;
         let has_video = track.music_video;
 
-        div()
+        let row = div()
             .id(("artist-track", index))
             .flex()
             .items_center()
@@ -641,8 +642,13 @@ impl ArtistScreen {
                     .path("icons/more.svg")
                     .size(px(16.0))
                     .text_color(rgb(0xb3b3b3)),
-            )
-            .into_any_element()
+            );
+        track_menu(
+            row,
+            format!("artist-track-menu-{index}"),
+            TrackMenuTarget::new(track.uri.clone(), track.title.clone()),
+            None,
+        )
     }
 
     fn render_popular_heading(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -715,6 +721,7 @@ impl ArtistScreen {
         let subtitle = card.subtitle.clone();
         let uri = card.uri.clone();
         let kind = card.kind;
+        let target = TrackMenuTarget::new(card.uri.clone(), card.name.clone());
 
         let mut body = div()
             .id("artist-pick")
@@ -773,7 +780,11 @@ impl ArtistScreen {
         };
         body = body.on_click(cx.listener(move |this, _, _, cx| this.open_card(&card, cx)));
 
-        section("Artist pick", None, body.into_any_element())
+        section(
+            "Artist pick",
+            None,
+            track_menu(body, "artist-pick-track-menu", target, None),
+        )
     }
 
     fn render_discography_heading(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1192,7 +1203,7 @@ impl ArtistScreen {
         let image = card.image_url.clone();
         let name = card.name.clone();
 
-        div()
+        let body = div()
             .id(("artist-card", card_id(&card.uri, index)))
             .group(group)
             .w(px(CARD_WIDTH))
@@ -1256,8 +1267,13 @@ impl ArtistScreen {
                     .text_size(px(13.0))
                     .text_color(rgb(0xffffff))
                     .child(price)
-            }))
-            .into_any_element()
+            }));
+        track_menu(
+            body,
+            format!("artist-card-menu-{}-{index}", card.uri),
+            TrackMenuTarget::new(card.uri.clone(), card.name.clone()),
+            None,
+        )
     }
 
     fn render_wide_card(
@@ -1271,7 +1287,7 @@ impl ArtistScreen {
         let subtitle = card.subtitle.clone();
         let image = card.image_url.clone();
         let has_image = image.is_some();
-        div()
+        let body = div()
             .id("artist-wide-card")
             .flex()
             .items_center()
@@ -1322,8 +1338,13 @@ impl ArtistScreen {
                             .text_color(rgb(0xb3b3b3))
                             .child(subtitle),
                     ),
-            )
-            .into_any_element()
+            );
+        track_menu(
+            body,
+            format!("artist-wide-menu-{}", card.uri),
+            TrackMenuTarget::new(card.uri.clone(), card.name.clone()),
+            None,
+        )
     }
 
     fn render_hero(&self) -> AnyElement {

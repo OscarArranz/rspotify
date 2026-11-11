@@ -16,6 +16,7 @@ use crate::view::components::library::{LibrarySidebar, LibrarySize};
 use crate::view::components::liked::{MUTED, like_plus, liked_check};
 use crate::view::components::render_cache::{cached_bar, cached_fill};
 use crate::view::components::resizable::{ResizableState, h_resizable, resizable_panel};
+use crate::view::components::track_menu::{self, TrackMenuTarget};
 use crate::view::components::track_title::track_title;
 use crate::view::screens::home::HomeScreen;
 
@@ -728,7 +729,19 @@ impl Render for PlayerBar {
                     )
                     .children(like_supported.then(|| {
                         self.render_like_control(like_uri.clone(), like_state, like_pending, cx)
-                    })),
+                    }))
+                    .map(|info| {
+                        if let Some(track) = &track {
+                            track_menu::track_menu(
+                                info,
+                                "player-track-menu",
+                                TrackMenuTarget::new(track.uri.clone(), track.title.clone()),
+                                None,
+                            )
+                        } else {
+                            info.into_any_element()
+                        }
+                    }),
             )
             .child(
                 // Center controls + progress

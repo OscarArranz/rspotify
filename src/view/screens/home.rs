@@ -10,6 +10,7 @@ use gpui::{
     point, prelude::FluentBuilder, px, rgb, svg,
 };
 
+use crate::view::components::track_menu::{TrackMenuTarget, track_menu};
 use crate::{
     lib::spotify::{
         NativeSpotify, PlaylistSource, SpotifyError,
@@ -439,7 +440,7 @@ impl HomeScreen {
         #[cfg(test)]
         self.rendered_card_ids.borrow_mut().push(id.clone());
         let open = item.clone();
-        div()
+        let card = div()
             .id(SharedString::from(id.clone()))
             .group("home-card")
             .flex()
@@ -493,8 +494,13 @@ impl HomeScreen {
                     .h(px(40.0))
                     .overflow_hidden()
                     .child(item.subtitle.clone()),
-            )
-            .into_any_element()
+            );
+        track_menu(
+            card,
+            format!("home-track-menu-{id}"),
+            TrackMenuTarget::new(item.uri.clone(), item.title.clone()),
+            None,
+        )
     }
 
     fn shelf(&self, index: usize, shelf: &HomeShelf, cx: &Context<Self>) -> AnyElement {
@@ -624,7 +630,7 @@ impl HomeScreen {
     fn featured(&self, item: &HomeItem, index: usize, cx: &Context<Self>) -> AnyElement {
         let open = item.clone();
         let size = if self.width < 650.0 { 140.0 } else { 220.0 };
-        div()
+        let card = div()
             .id(("featured", index))
             .flex()
             .items_center()
@@ -670,8 +676,13 @@ impl HomeScreen {
                             })
                             .child(self.share_button(item, format!("featured-share-{index}"), cx)),
                     ),
-            )
-            .into_any_element()
+            );
+        track_menu(
+            card,
+            format!("home-featured-menu-{index}"),
+            TrackMenuTarget::new(item.uri.clone(), item.title.clone()),
+            None,
+        )
     }
 
     fn panel(&self, index: usize, panel: &HomePanel, cx: &Context<Self>) -> AnyElement {
@@ -697,7 +708,7 @@ impl HomeScreen {
         } else {
             div().size_full().bg(rgb(0x263d36)).into_any_element()
         };
-        div()
+        let body = div()
             .flex()
             .flex_col()
             .gap(px(12.0))
@@ -802,8 +813,13 @@ impl HomeScreen {
                                     }),
                             ),
                     ),
-            )
-            .into_any_element()
+            );
+        track_menu(
+            body,
+            format!("home-panel-menu-{index}"),
+            TrackMenuTarget::new(panel.item.uri.clone(), panel.item.title.clone()),
+            None,
+        )
     }
     fn list_layout(&self) -> HomeListLayout {
         let mode = if self.loading {
@@ -884,7 +900,7 @@ impl HomeScreen {
                     .map(|(i, item)| {
                         let open = item.clone();
                         let id = format!("shortcut-{i}");
-                        div()
+                        let shortcut = div()
                             .id(SharedString::from(id.clone()))
                             .group("shortcut")
                             .relative()
@@ -930,7 +946,13 @@ impl HomeScreen {
                                             cx,
                                         )),
                                 )
-                            })
+                            });
+                        track_menu(
+                            shortcut,
+                            format!("home-shortcut-menu-{i}"),
+                            TrackMenuTarget::new(item.uri.clone(), item.title.clone()),
+                            None,
+                        )
                     }),
             )
             .into_any_element()

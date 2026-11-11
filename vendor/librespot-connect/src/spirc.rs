@@ -20,6 +20,7 @@ use crate::{
         connect::{Cluster, ClusterUpdate, LogoutCommand, SetVolumeCommand},
         context::Context,
         explicit_content_pubsub::UserAttributesUpdate,
+        player::ProvidedTrack,
         playlist4_external::PlaylistModificationInfo,
         social_connect_v2::SessionUpdate,
         transfer_state::TransferState,
@@ -36,12 +37,15 @@ use librespot_protocol::context_page::ContextPage;
 use protobuf::MessageField;
 use std::{
     future::Future,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::sleep,
+};
 
 #[derive(Debug, Error)]
 enum SpircError {
@@ -75,6 +79,7 @@ struct SpircTask {
     /// the state management object
     connect_state: ConnectState,
     remote_player_state: Arc<Mutex<Option<RemotePlayerState>>>,
+    pause_at_end_of_track: Arc<AtomicBool>,
     connect_established: bool,
 
     play_request_id: Option<u64>,
@@ -127,12 +132,18 @@ enum SpircCommand {
     Shuffle(bool),
     Repeat(bool),
     RepeatTrack(bool),
-    Disconnect { pause: bool },
+    Disconnect {
+        pause: bool,
+    },
     SetPosition(u32),
     SetVolume(u16),
     Activate,
     Transfer(Option<TransferRequest>),
     Load(LoadRequest),
+    AddToQueue {
+        track: ProvidedTrack,
+        reply: oneshot::Sender<Result<(), Error>>,
+    },
 }
 
 const CONTEXT_FETCH_THRESHOLD: usize = 2;
@@ -147,6 +158,7 @@ const UPDATE_STATE_DELAY: Duration = Duration::from_millis(200);
 pub struct Spirc {
     commands: mpsc::UnboundedSender<SpircCommand>,
     remote_player_state: Arc<Mutex<Option<RemotePlayerState>>>,
+    pause_at_end_of_track: Arc<AtomicBool>,
 }
 
 /// A read-only view of the account's player state delivered by Spotify Connect.
@@ -288,12 +300,14 @@ impl Spirc {
         let player_events = player.get_player_event_channel();
 
         let remote_player_state = Arc::new(Mutex::new(None));
+        let pause_at_end_of_track = Arc::new(AtomicBool::new(false));
         let mut task = SpircTask {
             player,
             mixer,
 
             connect_state,
             remote_player_state: remote_player_state.clone(),
+            pause_at_end_of_track: pause_at_end_of_track.clone(),
             connect_established: false,
 
             play_request_id: None,
@@ -326,6 +340,7 @@ impl Spirc {
         let spirc = Spirc {
             commands: cmd_tx,
             remote_player_state,
+            pause_at_end_of_track,
         };
 
         let initial_volume = task.connect_state.device_info().volume;
@@ -460,6 +475,39 @@ impl Spirc {
     /// Does not overwrite the queue.
     pub fn load(&self, command: LoadRequest) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::Load(command))?)
+    }
+
+    /// Appends to this device's queue without activating it or replacing its context.
+    /// Completes when the local state machine accepts or rejects the operation.
+    pub async fn add_to_queue(&self, uri: String) -> Result<(), Error> {
+        if !matches!(SpotifyUri::from_uri(&uri)?, SpotifyUri::Track { .. }) {
+            return Err(Error::invalid_argument(
+                "Only Spotify tracks can be queued here",
+            ));
+        }
+        let (reply, result) = oneshot::channel();
+        self.commands.send(SpircCommand::AddToQueue {
+            track: ProvidedTrack {
+                uri,
+                ..Default::default()
+            },
+            reply,
+        })?;
+        result.await?
+    }
+
+    /// Arms a one-shot pause before automatic track advancement, including repeat.
+    pub fn set_pause_at_end_of_track(&self, enabled: bool) -> Result<(), Error> {
+        if self.is_invalid() {
+            return Err(Error::unavailable("Spotify playback is disconnected"));
+        }
+        self.pause_at_end_of_track.store(enabled, Ordering::Release);
+        Ok(())
+    }
+
+    /// Returns whether the next current-track completion will pause instead of advancing.
+    pub fn pause_at_end_of_track(&self) -> bool {
+        self.pause_at_end_of_track.load(Ordering::Acquire)
     }
 
     /// Disconnects the current device and pauses the playback according the value.
@@ -704,8 +752,22 @@ impl SpircTask {
     }
 
     async fn handle_command(&mut self, cmd: SpircCommand) -> Result<(), Error> {
-        trace!("Received SpircCommand::{cmd:?}");
+        if matches!(&cmd, SpircCommand::AddToQueue { .. }) {
+            trace!("Received SpircCommand::AddToQueue");
+        } else {
+            trace!("Received SpircCommand::{cmd:?}");
+        }
         match cmd {
+            SpircCommand::AddToQueue { track, reply } => {
+                let result = self.connect_state.enqueue_track(track);
+                let accepted = result.is_ok();
+                let _ = reply.send(result);
+                return if accepted {
+                    self.notify().await
+                } else {
+                    Ok(())
+                };
+            }
             SpircCommand::Shutdown => {
                 trace!("Received SpircCommand::Shutdown");
                 self.handle_pause();
@@ -786,12 +848,18 @@ impl SpircTask {
 
         match event {
             PlayerEvent::EndOfTrack { .. } => {
-                let next_track = self
-                    .connect_state
-                    .repeat_track()
-                    .then(|| self.connect_state.current_track(|t| t.uri.clone()));
+                if self.pause_at_end_of_track.swap(false, Ordering::AcqRel) {
+                    // The ended stream cannot resume. Retain the song/context/queue and
+                    // reload paused at its start instead of advancing or repeating it.
+                    self.load_track(false, 0)?;
+                } else {
+                    let next_track = self
+                        .connect_state
+                        .repeat_track()
+                        .then(|| self.connect_state.current_track(|t| t.uri.clone()));
 
-                self.handle_next(next_track)?
+                    self.handle_next(next_track)?
+                }
             }
             PlayerEvent::Loading { .. } => match self.play_status {
                 SpircPlayStatus::LoadingPlay { position_ms } => {
@@ -1923,6 +1991,7 @@ mod tests {
         let spirc = Spirc {
             commands,
             remote_player_state: Arc::new(Mutex::new(None)),
+            pause_at_end_of_track: Arc::new(AtomicBool::new(false)),
         };
         let other = spirc.clone();
         assert!(!spirc.is_invalid());
