@@ -19,25 +19,21 @@ readable. TrackAlbum caches are account/source-scoped like existing detail cache
 
 ## Navigation and links
 
-A shared `track_title(title: &str, track_uri: &str, album_uri: Option<&str>)` component renders
-an inline-width, truncated, underlined-on-hover title for canonical song URIs only. It inherits
-font/color from its parent, uses a pointer cursor, and stops click propagation. Known album URIs
-push a Context source; otherwise TrackAlbum resolves on the destination's worker. Repeated
-clicks on the same current source do not push duplicate pages. Use the global authenticated
-client and StackRouterHandle, matching artist-credit navigation. Links do not issue play commands.
-Use a reserved transparent 1 px bottom border that becomes white on hover, matching the
-artist-credit link pattern. GPUI 0.2.2 applies hover styles at paint time, after text runs
-are shaped; a hover-only `.underline()` therefore does not add a visible text decoration.
-The border is painted independently of text shaping and does not change hover-time geometry.
+`player_track_title(title: &str, track_uri: &str)` renders the hover-underlined release link only
+in the now-playing bar. It resolves the song's containing release from native track metadata on
+the destination worker. It stops click propagation and never issues play commands.
 
-Apply this component in the now-playing bar, shared detail rows, search song rows/top result,
-artist track rows, and Home song card titles. Parent row/card/play-control handlers remain.
+Playlist/detail song titles render as plain text, so the surrounding row keeps its existing
+playback behavior. The Album column uses `album_title(title, album_uri, track_uri)`: a canonical
+album URI opens that album directly; if identity is missing, the canonical track URI resolves its
+release from native metadata. Names are never treated as identity. The link's text-only hit target
+uses a reserved transparent 1 px bottom border that becomes white on hover, matching
+artist-credit links without changing hover geometry, and stops row-click propagation.
 
-The track context menu's “Go to album” command calls the same `open_track_album` helper
-as a title with unknown album identity. It pushes the release-loading route immediately;
-native resolution stays in the destination worker. The menu does not prefetch a second
-copy of track/album metadata or label every destination as a full album.
-
+Song titles in search, artist, and Home views remain plain text, preserving their surrounding
+actions. The track context menu's explicit “Go to album” command continues to use
+`open_track_album`; it pushes the release-loading route immediately and resolves metadata on the
+destination worker.
 
 ## Shared screen
 

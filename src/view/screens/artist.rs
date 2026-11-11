@@ -24,7 +24,6 @@ use crate::view::components::smooth_scroll::{
     SmoothScrollState, list_scroll_overlay, nested_scroll_region,
 };
 use crate::view::components::track_menu::{TrackMenuTarget, track_menu};
-use crate::view::components::track_title::track_title;
 use crate::view::components::virtual_list::virtual_horizontal_list;
 use crate::view::screens::playlist::PlaylistScreen;
 
@@ -609,7 +608,7 @@ impl ArtistScreen {
                             .text_size(px(15.0))
                             .text_color(rgb(if playing { 0x1ed760 } else { 0xffffff }))
                             .truncate()
-                            .child(track_title(&track.title, &track.uri, None)),
+                            .child(track.title.clone()),
                     )
                     .child(
                         div()

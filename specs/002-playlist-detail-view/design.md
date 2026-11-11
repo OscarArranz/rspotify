@@ -118,10 +118,10 @@ return a playlist cover for the collection URI.
 - Header play/pause: if the snapshot's context is this page and it is playing, pause; if it is this
   page and paused, resume; otherwise `play_context(context_uri)`.
 - Shuffle toggles `set_shuffle(!snapshot.shuffle)`, and the icon is green while enabled.
-- A row click with a non-empty playable URI calls
+- A click on a playable row or its plain song title calls
   `play_context_at(context_uri, track_uri)`.
-- Song-title links (spec 016) consume the click and open the track's album/single/EP instead of
-  starting row playback. Artist-credit links similarly navigate without playing.
+- Album column entries (spec 016) open the containing album/single/EP without playback. Artist-credit
+  links similarly navigate without playing.
 - Search is local and case-insensitive over title, artist, and album. While a query is active, only
   loaded tracks are searched and pagination pauses; the field is labelled as a playlist search, not
   a global search.

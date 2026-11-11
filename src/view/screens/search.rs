@@ -14,7 +14,7 @@ use crate::view::components::smooth_scroll::{
     SmoothScrollElement, SmoothScrollState, list_scroll_overlay, nested_scroll_region,
 };
 use crate::view::components::track_menu::{TrackMenuTarget, track_menu};
-use crate::view::components::track_title::{open_album, track_title};
+use crate::view::components::track_title::open_album;
 use crate::view::screens::artist::{ArtistScreen, ArtistSource};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,7 +215,7 @@ fn track_row(item: &SearchItem, index: usize, client: &NativeSpotify) -> impl In
                 .flex_col()
                 .flex_1()
                 .min_w(px(0.0))
-                .child(track_title(&item.title, &item.uri, None))
+                .child(div().truncate().child(item.title.clone()))
                 .child(
                     div()
                         .text_sm()
@@ -468,7 +468,7 @@ fn top_result_card(item: &SearchItem, client: &NativeSpotify) -> AnyElement {
                 .flex_col()
                 .gap(px(4.0))
                 .min_w(px(0.0))
-                .child(track_title(&item.title, &item.uri, None))
+                .child(div().truncate().child(item.title.clone()))
                 .child(
                     div()
                         .text_sm()

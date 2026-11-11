@@ -24,7 +24,7 @@ use crate::lib::spotify::{
 };
 use crate::view::components::artist_credits::artist_credits;
 use crate::view::components::track_menu::{TrackMenuTarget, track_menu};
-use crate::view::components::track_title::track_title;
+use crate::view::components::track_title::album_title;
 
 const TRACK_OFFSET: usize = 3;
 const ALBUM_WIDTH: f32 = 160.0;
@@ -1305,11 +1305,7 @@ impl PlaylistScreen {
                     .text_size(px(15.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(title_color)
-                    .child(track_title(
-                        &track.title,
-                        &track.uri,
-                        track.album_uri.as_deref(),
-                    )),
+                    .child(track.title.clone()),
             )
             .children(track.explicit.then(|| {
                 div()
@@ -1436,7 +1432,11 @@ impl PlaylistScreen {
                         .truncate()
                         .text_size(px(13.0))
                         .text_color(rgb(0xb3b3b3))
-                        .child(track.album.clone()),
+                        .child(album_title(
+                            &track.album,
+                            track.album_uri.as_deref(),
+                            &track.uri,
+                        )),
                 )
                 .child(
                     div()

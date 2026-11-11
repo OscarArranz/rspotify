@@ -17,7 +17,7 @@ use crate::view::components::liked::{MUTED, like_plus, liked_check};
 use crate::view::components::render_cache::{cached_bar, cached_fill};
 use crate::view::components::resizable::{ResizableState, h_resizable, resizable_panel};
 use crate::view::components::track_menu::{self, TrackMenuTarget};
-use crate::view::components::track_title::track_title;
+use crate::view::components::track_title::player_track_title;
 use crate::view::screens::home::HomeScreen;
 
 const PANEL_MARGIN: f32 = 8.0;
@@ -706,7 +706,7 @@ impl Render for PlayerBar {
                                     .child(track.as_ref().map_or_else(
                                         || div().child("Nothing playing").into_any_element(),
                                         |track| {
-                                            track_title(&track.title, &track.uri, None)
+                                            player_track_title(&track.title, &track.uri)
                                                 .into_any_element()
                                         },
                                     )),

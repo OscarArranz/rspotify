@@ -23,7 +23,6 @@ use crate::{
             smooth_scroll::{
                 SmoothScrollElement, SmoothScrollState, list_scroll_overlay, nested_scroll_region,
             },
-            track_title::track_title,
             virtual_list::virtual_horizontal_list,
         },
         screens::playlist::{PlaylistScreen, render_cover},
@@ -485,7 +484,7 @@ impl HomeScreen {
                 div()
                     .font_weight(FontWeight::MEDIUM)
                     .text_ellipsis()
-                    .child(track_title(&item.title, &item.uri, None)),
+                    .child(item.title.clone()),
             )
             .child(
                 div()
@@ -658,7 +657,8 @@ impl HomeScreen {
                         div()
                             .text_3xl()
                             .font_weight(FontWeight::BOLD)
-                            .child(track_title(&item.title, &item.uri, None)),
+                            .truncate()
+                            .child(item.title.clone()),
                     )
                     .child(div().text_color(rgb(0xb3b3b3)).child(item.subtitle.clone()))
                     .child(
@@ -759,9 +759,13 @@ impl HomeScreen {
                                     .flex()
                                     .flex_col()
                                     .gap(px(8.0))
-                                    .child(div().text_2xl().font_weight(FontWeight::BOLD).child(
-                                        track_title(&panel.item.title, &panel.item.uri, None),
-                                    ))
+                                    .child(
+                                        div()
+                                            .text_2xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .truncate()
+                                            .child(panel.item.title.clone()),
+                                    )
                                     .child(
                                         div()
                                             .text_sm()
@@ -930,7 +934,7 @@ impl HomeScreen {
                                     .pr(px(8.0))
                                     .font_weight(FontWeight::BOLD)
                                     .text_ellipsis()
-                                    .child(track_title(&item.title, &item.uri, None)),
+                                    .child(item.title.clone()),
                             )
                             .when(item.playable, |s| {
                                 s.child(

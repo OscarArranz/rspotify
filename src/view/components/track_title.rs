@@ -14,20 +14,13 @@ fn canonical_uri(uri: &str, prefix: &str) -> bool {
         .is_some_and(|id| id.len() == 22 && SpotifyId::from_base62(id).is_ok())
 }
 
-pub(crate) fn track_title(
-    title: &str,
-    track_uri: &str,
-    album_uri: Option<&str>,
-) -> impl IntoElement {
+pub(crate) fn player_track_title(title: &str, track_uri: &str) -> impl IntoElement {
     let text = div().min_w(px(0.0)).truncate().child(title.to_string());
     if !canonical_uri(track_uri, "spotify:track:") {
         return div().child(text).into_any_element();
     }
 
     let track_uri = track_uri.to_string();
-    let album_uri = album_uri
-        .filter(|uri| canonical_uri(uri, "spotify:album:"))
-        .map(str::to_string);
     // The flex child keeps the hit target at the text's intrinsic width, shrinking
     // only when needed for ellipsis. Reserve the underline border to avoid hover-time shifts.
     div()
@@ -41,10 +34,42 @@ pub(crate) fn track_title(
                 .hover(|style| style.border_color(rgb(0xffffff)))
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
+                    open_track_album(&track_uri, cx);
+                }),
+        )
+        .into_any_element()
+}
+
+pub(crate) fn album_title(
+    title: &str,
+    album_uri: Option<&str>,
+    track_uri: &str,
+) -> impl IntoElement {
+    let album_uri = album_uri
+        .filter(|uri| canonical_uri(uri, "spotify:album:"))
+        .map(str::to_string);
+    let track_uri = (album_uri.is_none() && canonical_uri(track_uri, "spotify:track:"))
+        .then(|| track_uri.to_string());
+    let text = div().min_w(px(0.0)).truncate().child(title.to_string());
+    if album_uri.is_none() && track_uri.is_none() {
+        return div().child(text).into_any_element();
+    }
+
+    div()
+        .flex()
+        .min_w(px(0.0))
+        .child(
+            text.id("album-title")
+                .cursor_pointer()
+                .border_b_1()
+                .border_color(gpui::transparent_black())
+                .hover(|style| style.border_color(rgb(0xffffff)).text_color(rgb(0xffffff)))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
                     if let Some(uri) = album_uri.as_deref() {
                         open_album(uri, cx);
-                    } else {
-                        open_track_album(&track_uri, cx);
+                    } else if let Some(uri) = track_uri.as_deref() {
+                        open_track_album(uri, cx);
                     }
                 }),
         )
@@ -109,24 +134,44 @@ mod tests {
     };
     use std::{cell::Cell, rc::Rc};
 
+    #[derive(Clone, Copy)]
+    enum TitleKind {
+        Player,
+        Album,
+    }
+
     struct TestView {
         list: ListState,
         playback_clicks: Rc<Cell<usize>>,
+        title_kind: TitleKind,
     }
 
     impl Render for TestView {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let playback_clicks = self.playback_clicks.clone();
+            let title_kind = self.title_kind;
             div()
                 .size_full()
                 .relative()
                 .child(
                     list(self.list.clone(), move |index, _, _| {
                         let clicks = playback_clicks.clone();
-                        let uri = if index == 0 {
-                            "spotify:track:0000000000000000000001"
-                        } else {
-                            "spotify:episode:0000000000000000000001"
+                        let uri = match title_kind {
+                            TitleKind::Player if index == 0 => {
+                                "spotify:track:0000000000000000000001"
+                            }
+                            TitleKind::Player => "spotify:episode:0000000000000000000001",
+                            TitleKind::Album if index < 2 => "spotify:track:0000000000000000000001",
+                            TitleKind::Album => "spotify:episode:0000000000000000000001",
+                        };
+                        let title = match title_kind {
+                            TitleKind::Player => player_track_title("Song", uri).into_any_element(),
+                            TitleKind::Album => album_title(
+                                "Album",
+                                (index == 0).then_some("spotify:album:0000000000000000000001"),
+                                uri,
+                            )
+                            .into_any_element(),
                         };
                         div()
                             .id(("playback-row", index))
@@ -137,7 +182,7 @@ mod tests {
                                 div()
                                     .text_size(px(13.0))
                                     .debug_selector(move || format!("title-label-{index}"))
-                                    .child(track_title("Song", uri, None)),
+                                    .child(title),
                             )
                             .into_any_element()
                     })
@@ -157,6 +202,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(|_, _| TestView {
             list: ListState::new(2, ListAlignment::Top, px(100.0)),
             playback_clicks: clicks.clone(),
+            title_kind: TitleKind::Player,
         });
         cx.draw(
             point(px(0.0), px(0.0)),
@@ -193,6 +239,51 @@ mod tests {
         );
         cx.simulate_click(point(px(10.0), px(64.0)), Default::default());
         assert_eq!(clicks.get(), 2, "non-song titles must retain row playback");
+    }
+
+    #[gpui::test]
+    fn album_column_links_stop_row_clicks_and_fall_back_to_track_metadata(cx: &mut TestAppContext) {
+        let clicks = Rc::new(Cell::new(0));
+        let (view, cx) = cx.add_window_view(|_, _| TestView {
+            list: ListState::new(3, ListAlignment::Top, px(100.0)),
+            playback_clicks: clicks.clone(),
+            title_kind: TitleKind::Album,
+        });
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(200.0), px(168.0)),
+            |_, _| view.clone(),
+        );
+        cx.simulate_mouse_move(point(px(150.0), px(8.0)), None, Default::default());
+        let idle_bounds = cx
+            .debug_bounds("title-label-0")
+            .expect("album title is rendered");
+        cx.simulate_mouse_move(point(px(10.0), px(8.0)), None, Default::default());
+        assert_eq!(
+            cx.debug_bounds("title-label-0"),
+            Some(idle_bounds),
+            "album hover must not shift the title"
+        );
+        cx.simulate_click(point(px(10.0), px(8.0)), Default::default());
+        assert_eq!(
+            clicks.get(),
+            0,
+            "known album link must consume the row click"
+        );
+        cx.simulate_click(point(px(150.0), px(8.0)), Default::default());
+        assert_eq!(
+            clicks.get(),
+            1,
+            "space beyond the album text keeps row playback"
+        );
+        cx.simulate_click(point(px(10.0), px(64.0)), Default::default());
+        assert_eq!(
+            clicks.get(),
+            1,
+            "missing album identity falls back to track metadata"
+        );
+        cx.simulate_click(point(px(10.0), px(120.0)), Default::default());
+        assert_eq!(clicks.get(), 2, "non-song album entries keep row behavior");
     }
 
     #[test]

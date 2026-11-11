@@ -21,8 +21,9 @@ playback through the existing local Spotify Connect device.
 - The action bar provides play/pause, shuffle, and local search. Download and overflow controls are
   rendered disabled because the native download/command services are not implemented.
 - Track rows show index or playing indicator, artwork, title, artist, album, date added, and
-  duration. Clicking a row starts the playlist context at that track; song-title links instead open
-  the containing release without playback (spec 016), and artist-credit links open artist profiles.
+  duration. Clicking a playable row or its plain song title starts the playlist context at that
+  track; Album column entries open the containing release without playback (spec 016), and
+  artist-credit links open artist profiles.
 - The active playlist and track are highlighted from the shared playback snapshot.
 - Local search filters loaded tracks by title, artist, or album. Sort cycles between Spotify order,
   title, album, and recently added.
